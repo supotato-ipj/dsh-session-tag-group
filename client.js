@@ -462,13 +462,9 @@ window.__ModuleLoader__.load({
       if (q === '') return { items: [], hasMore: false };
       const archived = new Set(archivedSessionIds);
       const current = mainSessionId(list);
-      const workspaceBySession = new Map();
-      for (const workspace of workspaces) {
-        for (const sessionId of workspace.sessionIds) {
-          if (!workspaceBySession.has(sessionId)) workspaceBySession.set(sessionId, workspace.title);
-        }
-      }
-      const labelOf = (summary) => workspaceBySession.get(summary.id) ?? workspaceLabel(summary.cwd);
+      // D4：归属名逻辑单一来源 = workspaceLabelOf（原先这里手搓
+      // workspaceBySession 映射 + 同款 cwd 回退，两处并行维护同一语义）。
+      const labelOf = (summary) => workspaceLabelOf(summary, workspaces);
       const contentBySession = new Map();
       for (const item of content.items) if (!contentBySession.has(item.sessionId)) contentBySession.set(item.sessionId, item);
       const local = [];
@@ -513,9 +509,10 @@ window.__ModuleLoader__.load({
       };
     }
 
-    /** workspace-tree 嵌套父查找：最长前缀目录匹配，排除自身（uiw client.js:1224-1246）。 */
+    /** workspace-tree 嵌套父查找：最长前缀目录匹配，排除自身（uiw client.js:1224-1246）。
+     * D4：Windows 风格判定复用 isWindowsStylePath（原先手写同一正则）。 */
     function folderPath(path) {
-      const normalized = /^[A-Za-z]:[/\\]/.test(path) || path.startsWith('\\\\') ? path.replaceAll('\\', '/') : path;
+      const normalized = isWindowsStylePath(path) ? path.replaceAll('\\', '/') : path;
       return normalized.replace(/\/+$/, '');
     }
 
@@ -944,9 +941,22 @@ window.__ModuleLoader__.load({
       return 4;
     }
 
-    /** 行上悬停兜底文案（悬停卡属 T2；未合入前 title/aria-label 用它）。 */
+    /** 行上悬停兜底文案（悬停卡扩展段补口后与 tagDotTitle 并存：前者全量行、后者 title 串）。 */
     function tagDotTitle(names) {
       return (Array.isArray(names) ? names : []).join(' · ');
+    }
+
+    /**
+     * 悬停卡扩展段（`sidebar.session.row.hover` 占用者，票 #4 AC 补口）的行拼装：
+     * 每个标签一行 { name, color }（色与行色点/组头同源 tagColorOf）；无标签 →
+     * 空数组（占用者渲染 null，扩展段整体不出现）。与行首色点不同：不收敛数量——
+     * 悬停卡有整列空间，全量列出；状态点占用 leading 格导致色点让位时，这里
+     * 是标签名的唯一可见面（SessionHoverContent 的 hover 槽在 showStatus 分支外
+     * 无条件渲染，两处互不耦合）。输入只有标签镜像名（listAll/listSessionTags
+     * 回填的 tagsStore），不读任何行渲染态。
+     */
+    function hoverTagRows(names) {
+      return (Array.isArray(names) ? names : []).map((name) => ({ name, color: tagColorOf(name) }));
     }
 
     /** 标签名规整（Client 侧输入校验；语义与 tag-store.js 同拍）。 */
@@ -981,7 +991,8 @@ window.__ModuleLoader__.load({
 
     /**
      * 行级 workspace 标注：归属 workspace（sessionIds 权威）的显示名 →
-     * 游离会话回退 cwd 尾段 → 都没有为空串（deriveSearchResults 的 labelOf 同形）。
+     * 游离会话回退 cwd 尾段 → 都没有为空串。D4 起是归属名的单一来源：
+     * deriveSearchResults 的 labelOf 直接复用本函数（语义同原 map 首见 wins）。
      */
     function workspaceLabelOf(summary, workspaces) {
       const owner = (Array.isArray(workspaces) ? workspaces : [])
@@ -1331,28 +1342,30 @@ window.__ModuleLoader__.load({
       });
     }
 
-    /** workspace 头行（uiw client.js:2182-2319；悬停卡留 T2，故直接渲染锚点行）。 */
-    function ProjectRowItem(props) {
+    /** workspace 头行（uiw client.js:2182-2319；悬停卡留 T2，故直接渲染锚点行）。
+     * G1 术语统一：行组件一律 Workspace 系命名（GLOSSARY：workspace 禁用「项目」代称）；
+     * 内置编译类键（RW.projectRow 等）是复刻契约，逐字保留，不随标识符改名。 */
+    function WorkspaceRowItem(props) {
       const workspaceId = props.group.workspaceId;
-      if (workspaceId === undefined) return React.createElement(UngroupedProjectRow, props);
-      return React.createElement(WorkspaceProjectRow, { ...props, workspaceId });
+      if (workspaceId === undefined) return React.createElement(UngroupedWorkspaceRow, props);
+      return React.createElement(GroupedWorkspaceRow, { ...props, workspaceId });
     }
 
-    function UngroupedProjectRow(props) {
+    function UngroupedWorkspaceRow(props) {
       const create = props.useRemoteAccess('session/create');
-      return React.createElement(ProjectRow, { ...props, access: { create, reorder: false } });
+      return React.createElement(WorkspaceRow, { ...props, access: { create, reorder: false } });
     }
 
-    function WorkspaceProjectRow({ workspaceId, ...props }) {
+    function GroupedWorkspaceRow({ workspaceId, ...props }) {
       const { useWorkspaceAccess } = props;
       const access = {
         create: useWorkspaceAccess(workspaceId, 'session/create'),
         reorder: useWorkspaceAccess(workspaceId, 'workspace/insertBefore'),
       };
-      return React.createElement(ProjectRow, { ...props, access });
+      return React.createElement(WorkspaceRow, { ...props, access });
     }
 
-    function ProjectRow({ group, containsCurrentDescendant = false, onToggle, onCreate, drag: offeredDrag, home, newShortcut, t, access, openWorkspaceMenu, useContextMenuTarget, useContextMenu }) {
+    function WorkspaceRow({ group, containsCurrentDescendant = false, onToggle, onCreate, drag: offeredDrag, home, newShortcut, t, access, openWorkspaceMenu, useContextMenuTarget, useContextMenu }) {
       const { getTriggerProps } = useContextMenu();
       const drag = access.reorder ? offeredDrag : undefined;
       const row = group;
@@ -1585,14 +1598,46 @@ window.__ModuleLoader__.load({
       });
     }
 
+    /**
+     * 水位线簇（D1 去重）：SessionTree（分组树）与 TagGroupsView（标签组）原本
+     * 各持一份 storedWatermarks/watermarkMotionKey 状态 + 抬升回写/丢弃/溢出按钮
+     * 行为，语义逐字相同（复刻内置），提取为本 hook 两处共用。
+     * `requiredWatermarks` 由调用方算好传入——两处基线口径不同（树会滤掉折叠
+     * 祖先下的组，标签组全量），hook 只管「只升不降」的存储与三个操作。
+     * `overflowToggle(key, expanded, watermark, hiddenCount)` 是溢出按钮 onClick
+     * 的共享行为：已全展开 → 丢该组水位（收起回基线）；否则抬升一档（余量
+     * 不超一档时 Infinity 全展开）并触发行动画重放。
+     */
+    function useWatermarks(requiredWatermarks) {
+      const [storedWatermarks, setStoredWatermarks] = React.useState({});
+      const [watermarkMotionKey, setWatermarkMotionKey] = React.useState(0);
+      const sessionWatermarks = raiseWatermarks(storedWatermarks, requiredWatermarks);
+      if (sessionWatermarks !== storedWatermarks) setStoredWatermarks((marks) => raiseWatermarks(marks, requiredWatermarks));
+      const dropWatermarks = (drop) => {
+        if (!Object.keys(storedWatermarks).some(drop)) return;
+        setStoredWatermarks((marks) => Object.fromEntries(Object.entries(marks).filter(([key]) => !drop(key))));
+        setWatermarkMotionKey((motionKey) => motionKey + 1);
+      };
+      const overflowToggle = (key, expanded, watermark, hiddenCount) => {
+        if (expanded) {
+          dropWatermarks((dropKey) => dropKey === key);
+          return;
+        }
+        setStoredWatermarks((marks) => ({
+          ...marks,
+          [key]: hiddenCount <= SESSION_WATERMARK_BASE ? Infinity : watermark + SESSION_WATERMARK_BASE,
+        }));
+        setWatermarkMotionKey((motionKey) => motionKey + 1);
+      };
+      return { sessionWatermarks, dropWatermarks, overflowToggle, watermarkMotionKey };
+    }
+
     /** 分组树（uiw client.js:3170-3500，原样复刻含水位线与拖拽）。 */
     function SessionTree({ list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds, rowState, onLeaveArchivedOnly, workspaceReady, animationResetKey, usePanelInfo, useRemoteAccess, useSessionAccess, useWorkspaceAccess, onSessionRenameRequest, renderSlot, openSessionMenu, openWorkspaceMenu, useContextMenuTarget, useContextMenu, insertWorkspaceBefore, nestWorkspaces, groupExpansion, setGroupExpanded, setSessionOrder, home, t, revealSessionId, onSessionRevealed, shortcuts }) {
       const panelActive = usePanelInfo((info) => info.activePanelId !== null);
       const statuses = useSessionStatus((s) => s);
       const current = panelActive ? undefined : mainSessionId(list);
       const revealGroup = revealSessionId === undefined || !workspaceReady ? undefined : owningGroupKey(workspaces, revealSessionId);
-      const [storedWatermarks, setStoredWatermarks] = React.useState({});
-      const [watermarkMotionKey, setWatermarkMotionKey] = React.useState(0);
       const [drag, setDrag] = React.useState(null);
       const sessionDropCommitted = React.useRef(false);
       const [workspaceDrag, setWorkspaceDrag] = React.useState(null);
@@ -1638,13 +1683,7 @@ window.__ModuleLoader__.load({
         return false;
       };
       const requiredWatermarks = new Map([...baselines].filter(([key]) => !underFoldedAncestor(key)));
-      const sessionWatermarks = raiseWatermarks(storedWatermarks, requiredWatermarks);
-      if (sessionWatermarks !== storedWatermarks) setStoredWatermarks((marks) => raiseWatermarks(marks, requiredWatermarks));
-      const dropWatermarks = (drop) => {
-        if (!Object.keys(storedWatermarks).some(drop)) return;
-        setStoredWatermarks((marks) => Object.fromEntries(Object.entries(marks).filter(([key]) => !drop(key))));
-        setWatermarkMotionKey((key) => key + 1);
-      };
+      const { sessionWatermarks, dropWatermarks, overflowToggle, watermarkMotionKey } = useWatermarks(requiredWatermarks);
       const withinGroup = (key, root) => {
         for (let owner = key; owner !== undefined; owner = parents.get(owner)) if (owner === root) return true;
         return false;
@@ -1729,7 +1768,7 @@ window.__ModuleLoader__.load({
           commitWorkspaceDrag(workspaceDrag, { id: workspaceId, half });
         };
         const groupChildren = [
-          React.createElement(ProjectRowItem, {
+          React.createElement(WorkspaceRowItem, {
             key: 'header',
             newShortcut: shortcuts.find((row) => row.id === 'session.new'),
             group,
@@ -1806,17 +1845,7 @@ window.__ModuleLoader__.load({
             className: WB.sessionOverflowButton,
             'data-row-key': 'overflow:' + group.key,
             'aria-expanded': sessionsExpanded,
-            onClick: () => {
-              if (sessionsExpanded) {
-                dropWatermarks((key) => key === group.key);
-                return;
-              }
-              setStoredWatermarks((marks) => ({
-                ...marks,
-                [group.key]: visible.hiddenCount <= SESSION_WATERMARK_BASE ? Infinity : watermark + SESSION_WATERMARK_BASE,
-              }));
-              setWatermarkMotionKey((key) => key + 1);
-            },
+            onClick: () => { overflowToggle(group.key, sessionsExpanded, watermark, visible.hiddenCount); },
           }, sessionsExpanded ? t('sessions.collapse') : t('sessions.expand', { n: visible.hiddenCount })));
         }
         return React.createElement('div', {
@@ -3074,9 +3103,10 @@ window.__ModuleLoader__.load({
     /**
      * 行首标签色点（`sidebar.session.row.leading` 占用者）。
      * 优先级取舍：内置状态点占用同一 16px 格时，T1 渲染层根本不调 renderSlot
-     * （SessionNodeItem 的 showStatus 分支）——色点整体让位；悬停仍可见（行菜单
-     * 弹层），且状态点的语义优先级本来更高（00 笔记 §4）。收敛：最多 3 点，
-     * 点径随数量收缩，全量标签名进 title 兜底（悬停卡属 T2）。
+     * （SessionNodeItem 的 showStatus 分支）——色点整体让位；且状态点的语义
+     * 优先级本来更高（00 笔记 §4）。收敛：最多 3 点，点径随数量收缩，全量
+     * 标签名进 title 兜底；悬停卡扩展段（SessionHoverTags，票 #4 AC 补口）
+     * 合入后，标签名的常驻可见面在悬停卡（不随 leading 让位消失）。
      */
     function SessionTagDots({ sessionId }) {
       const snapshot = useMiniStore(tagsStore);
@@ -3092,6 +3122,23 @@ window.__ModuleLoader__.load({
         key: name,
         style: { width: size + 'px', height: size + 'px', borderRadius: '50%', background: tagColorOf(name), flex: '0 0 auto' },
       })));
+    }
+
+    /**
+     * 悬停卡扩展段（`sidebar.session.row.hover` 占用者，票 #4 AC 补口）：
+     * 每标签一行（SessionHoverContent 既有 hoverStatus 行形态，类名映射复用：
+     * 色点 + 名字）。无标签渲染 null——扩展段整体不出现；数据只读 tagsStore
+     * 镜像（listAll 首屏 + 变更响应回填，即 10 号笔记 §2 的 listSessionTags/
+     * listAll 契约），不做悬停即拉取（一期无 Host→Client 推送，弹层打开时
+     * 已有 refreshSessionTags 兜底）。
+     */
+    function SessionHoverTags({ sessionId }) {
+      const snapshot = useMiniStore(tagsStore);
+      const rows = hoverTagRows(snapshot.bySession[sessionId] ?? []);
+      if (rows.length === 0) return null;
+      return React.createElement(React.Fragment, null, rows.map((row) => React.createElement('div', { key: row.name, className: RW.hoverStatus },
+        React.createElement('span', { 'aria-hidden': true, style: { width: '10px', height: '10px', borderRadius: '50%', background: row.color, display: 'inline-block', flex: '0 0 auto' } }),
+        React.createElement('span', null, row.name))));
     }
 
     /** 「编辑标签」菜单项图标（contextMenu.icon keyed 座位，原创图形）。 */
@@ -3273,7 +3320,8 @@ window.__ModuleLoader__.load({
     /**
      * 标签模式聚合视图（票 #5）：deriveTagGroups 的渲染器。跨 workspace 聚合、
      * 组头标签名+色点、行级 workspace 标注（SessionNodeItem sourceLabel）、
-     * 水位线（显示更多/收起，模式照 SessionTree）、组展开/收起。
+     * 水位线（显示更多/收起，与 SessionTree 共用 useWatermarks，D1）、
+     * 组展开/收起。
      * 展开态用本地 state（默认全展开）：共享 view store 的 retainAccountKeys
      * 只保留 workspace 键，标签键入 store 会被清掉，故不入 store（重启后
      * 标签组全展开，属选定取舍——跨重启记忆的契约只有模式选择本身）。
@@ -3290,16 +3338,9 @@ window.__ModuleLoader__.load({
       const isExpanded = React.useCallback((key) => collapsedKeys[key] !== true, [collapsedKeys]);
       const matchIds = React.useMemo(() => tagSearchMatchIds(list, workspaces, snapshot, query, remote), [list, workspaces, snapshot, query, remote]);
       const groups = React.useMemo(() => deriveTagGroups(list, workspaces, rowState, statuses, snapshot, { isExpanded, matchIds }), [list, workspaces, rowState, statuses, snapshot, isExpanded, matchIds]);
-      const [storedWatermarks, setStoredWatermarks] = React.useState({});
-      const [watermarkMotionKey, setWatermarkMotionKey] = React.useState(0);
       const baselines = new Map(groups.map((group) => [group.key, Math.max(SESSION_WATERMARK_BASE, requiredWatermark(group.sessions, current, undefined))]));
-      const sessionWatermarks = raiseWatermarks(storedWatermarks, baselines);
-      if (sessionWatermarks !== storedWatermarks) setStoredWatermarks((marks) => raiseWatermarks(marks, baselines));
-      const dropWatermarks = (drop) => {
-        if (!Object.keys(storedWatermarks).some(drop)) return;
-        setStoredWatermarks((marks) => Object.fromEntries(Object.entries(marks).filter(([key]) => !drop(key))));
-        setWatermarkMotionKey((key) => key + 1);
-      };
+      // D1：水位线簇与 SessionTree 共用 useWatermarks（此处基线 = 全量组，无折叠祖先过滤）。
+      const { sessionWatermarks, overflowToggle, watermarkMotionKey } = useWatermarks(baselines);
       const now = Date.now();
       const rowKeys = [];
       const groupRows = [];
@@ -3346,17 +3387,7 @@ window.__ModuleLoader__.load({
             className: WB.sessionOverflowButton,
             'data-row-key': 'overflow:' + group.key,
             'aria-expanded': sessionsExpanded,
-            onClick: () => {
-              if (sessionsExpanded) {
-                dropWatermarks((key) => key === group.key);
-                return;
-              }
-              setStoredWatermarks((marks) => ({
-                ...marks,
-                [group.key]: visible.hiddenCount <= SESSION_WATERMARK_BASE ? Infinity : watermark + SESSION_WATERMARK_BASE,
-              }));
-              setWatermarkMotionKey((key) => key + 1);
-            },
+            onClick: () => { overflowToggle(group.key, sessionsExpanded, watermark, visible.hiddenCount); },
           }, sessionsExpanded ? t('sessions.collapse') : t('sessions.expand', { n: visible.hiddenCount })));
         }
         groupRows.push(React.createElement('div', { key: group.key, className: WB.groupSection }, rows));
@@ -3498,6 +3529,15 @@ window.__ModuleLoader__.load({
           order: 10,
         }, SessionTagDots));
 
+        // 悬停卡扩展段（票 #4 AC 补口）：标签名进会话悬停卡。hover 槽由
+        // SessionHoverContent 无条件 renderSlot（在 showStatus 分支之外），状态点
+        // 占用 leading 格、色点让位时标签名仍在此可见；无标签本占用者渲染 null。
+        ctx.slots.inject('sidebar.session.row.hover', () => ctx.slots.register({
+          name: 'sidebar.session.row.hover',
+          id: 'session-tags.hover-tags',
+          order: 10,
+        }, SessionHoverTags));
+
         // 「编辑标签」菜单项：走 contextMenus.register（内置会话菜单五项的同款
         // 机制：pin 100 / rename 200 / fork 300 / copy-id 450 / archive 600，
         // 本项 500 落在 copy-id 与 archive 之间）。票面原文写的是
@@ -3606,6 +3646,7 @@ window.__ModuleLoader__.load({
         visibleTagDots,
         tagDotSize,
         tagDotTitle,
+        hoverTagRows,
         normalizeTagName,
         TAG_PINNED_KEY,
         TAG_UNTAGGED_KEY,

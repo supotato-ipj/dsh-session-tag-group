@@ -4,10 +4,8 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 ## Status
 
-Not connected yet: this directory is not a git repository and has no GitHub remote.
-Before any `gh issue` command works: `git init`, create the GitHub repo, then
-`git remote add origin git@github.com:<owner>/<repo>.git`. After connecting,
-create the five triage labels from `triage-labels.md` if they don't exist.
+Connected: `origin` = `https://github.com/supotato-ipj/dsh-pin-session-tag-group.git` (private repo, branch `main`).
+All five triage labels from `triage-labels.md` exist on the tracker (`wontfix` is the GitHub default with its stock description; the other four were created 2026-11-07).
 
 ## Conventions
 

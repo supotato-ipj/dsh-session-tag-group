@@ -83,19 +83,30 @@ export const tagGlobalSchema = {
   },
 };
 
-function normalizePool(rawTags) {
-  if (!Array.isArray(rawTags)) return [];
+/**
+ * 标签名序列的统一规整核（D2 内部去重）：trim + 压缩空白、丢空、tagKey 小写键
+ * 去重（首见写法保留）、保序。`allowedKeys` 传入时仅保留白名单内的键
+ * （bySession 挂载只认池内标签）；缺省不设白名单（池与目标集路径）。
+ * 跨文件不共享：client.js 的 normalizeTagName 双实现是经典脚本限制 + parity
+ * 测试锁定的既定取舍，不动。
+ */
+function normalizeTagNames(rawTags, allowedKeys) {
+  const names = [];
   const seen = new Set();
-  const tags = [];
-  for (const raw of rawTags) {
+  for (const raw of Array.isArray(rawTags) ? rawTags : []) {
     const name = normalizeTagName(raw);
     if (name === '') continue;
     const key = tagKey(name);
     if (seen.has(key)) continue;
+    if (allowedKeys !== undefined && !allowedKeys.has(key)) continue;
     seen.add(key);
-    tags.push(name);
+    names.push(name);
   }
-  return tags;
+  return names;
+}
+
+function normalizePool(rawTags) {
+  return normalizeTagNames(rawTags);
 }
 
 function normalizeBySession(rawBySession, pool) {
@@ -104,16 +115,7 @@ function normalizeBySession(rawBySession, pool) {
   const bySession = {};
   for (const [sessionId, rawTags] of Object.entries(rawBySession)) {
     if (typeof sessionId !== 'string' || sessionId === '') continue;
-    const tags = [];
-    const seen = new Set();
-    for (const raw of Array.isArray(rawTags) ? rawTags : []) {
-      const name = normalizeTagName(raw);
-      if (name === '') continue;
-      const key = tagKey(name);
-      if (seen.has(key) || !poolKeys.has(key)) continue;
-      seen.add(key);
-      tags.push(name);
-    }
+    const tags = normalizeTagNames(rawTags, poolKeys);
     if (tags.length > 0) bySession[sessionId] = tags;
   }
   return bySession;
@@ -178,21 +180,6 @@ export function createTagService({ domain, sessionExists }) {
         poolKeys.add(key);
       }
     }
-  }
-
-  /** 规整目标标签集：trim/丢空/大小写去重，保序。 */
-  function normalizeTagSet(rawTags) {
-    const names = [];
-    const seen = new Set();
-    for (const raw of Array.isArray(rawTags) ? rawTags : []) {
-      const name = normalizeTagName(raw);
-      if (name === '') continue;
-      const key = tagKey(name);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      names.push(name);
-    }
-    return names;
   }
 
   let chain = Promise.resolve();
@@ -277,7 +264,8 @@ export function createTagService({ domain, sessionExists }) {
         if (!(await existsOrUnknown(sessionId))) {
           throw new TagServiceError('session-missing', `会话不存在：${sessionId}`);
         }
-        const names = normalizeTagSet(tags);
+        // 规整目标标签集：trim/丢空/大小写去重，保序（normalizeTagNames 共享核，D2）。
+        const names = normalizeTagNames(tags);
         ensureInPool(doc, names);
         if (names.length > 0) doc.bySession[sessionId] = names;
         else delete doc.bySession[sessionId];

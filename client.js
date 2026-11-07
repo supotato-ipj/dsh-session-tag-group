@@ -462,13 +462,9 @@ window.__ModuleLoader__.load({
       if (q === '') return { items: [], hasMore: false };
       const archived = new Set(archivedSessionIds);
       const current = mainSessionId(list);
-      const workspaceBySession = new Map();
-      for (const workspace of workspaces) {
-        for (const sessionId of workspace.sessionIds) {
-          if (!workspaceBySession.has(sessionId)) workspaceBySession.set(sessionId, workspace.title);
-        }
-      }
-      const labelOf = (summary) => workspaceBySession.get(summary.id) ?? workspaceLabel(summary.cwd);
+      // D4：归属名逻辑单一来源 = workspaceLabelOf（原先这里手搓
+      // workspaceBySession 映射 + 同款 cwd 回退，两处并行维护同一语义）。
+      const labelOf = (summary) => workspaceLabelOf(summary, workspaces);
       const contentBySession = new Map();
       for (const item of content.items) if (!contentBySession.has(item.sessionId)) contentBySession.set(item.sessionId, item);
       const local = [];
@@ -513,9 +509,10 @@ window.__ModuleLoader__.load({
       };
     }
 
-    /** workspace-tree 嵌套父查找：最长前缀目录匹配，排除自身（uiw client.js:1224-1246）。 */
+    /** workspace-tree 嵌套父查找：最长前缀目录匹配，排除自身（uiw client.js:1224-1246）。
+     * D4：Windows 风格判定复用 isWindowsStylePath（原先手写同一正则）。 */
     function folderPath(path) {
-      const normalized = /^[A-Za-z]:[/\\]/.test(path) || path.startsWith('\\\\') ? path.replaceAll('\\', '/') : path;
+      const normalized = isWindowsStylePath(path) ? path.replaceAll('\\', '/') : path;
       return normalized.replace(/\/+$/, '');
     }
 
@@ -994,7 +991,8 @@ window.__ModuleLoader__.load({
 
     /**
      * 行级 workspace 标注：归属 workspace（sessionIds 权威）的显示名 →
-     * 游离会话回退 cwd 尾段 → 都没有为空串（deriveSearchResults 的 labelOf 同形）。
+     * 游离会话回退 cwd 尾段 → 都没有为空串。D4 起是归属名的单一来源：
+     * deriveSearchResults 的 labelOf 直接复用本函数（语义同原 map 首见 wins）。
      */
     function workspaceLabelOf(summary, workspaces) {
       const owner = (Array.isArray(workspaces) ? workspaces : [])
@@ -1600,14 +1598,46 @@ window.__ModuleLoader__.load({
       });
     }
 
+    /**
+     * 水位线簇（D1 去重）：SessionTree（分组树）与 TagGroupsView（标签组）原本
+     * 各持一份 storedWatermarks/watermarkMotionKey 状态 + 抬升回写/丢弃/溢出按钮
+     * 行为，语义逐字相同（复刻内置），提取为本 hook 两处共用。
+     * `requiredWatermarks` 由调用方算好传入——两处基线口径不同（树会滤掉折叠
+     * 祖先下的组，标签组全量），hook 只管「只升不降」的存储与三个操作。
+     * `overflowToggle(key, expanded, watermark, hiddenCount)` 是溢出按钮 onClick
+     * 的共享行为：已全展开 → 丢该组水位（收起回基线）；否则抬升一档（余量
+     * 不超一档时 Infinity 全展开）并触发行动画重放。
+     */
+    function useWatermarks(requiredWatermarks) {
+      const [storedWatermarks, setStoredWatermarks] = React.useState({});
+      const [watermarkMotionKey, setWatermarkMotionKey] = React.useState(0);
+      const sessionWatermarks = raiseWatermarks(storedWatermarks, requiredWatermarks);
+      if (sessionWatermarks !== storedWatermarks) setStoredWatermarks((marks) => raiseWatermarks(marks, requiredWatermarks));
+      const dropWatermarks = (drop) => {
+        if (!Object.keys(storedWatermarks).some(drop)) return;
+        setStoredWatermarks((marks) => Object.fromEntries(Object.entries(marks).filter(([key]) => !drop(key))));
+        setWatermarkMotionKey((motionKey) => motionKey + 1);
+      };
+      const overflowToggle = (key, expanded, watermark, hiddenCount) => {
+        if (expanded) {
+          dropWatermarks((dropKey) => dropKey === key);
+          return;
+        }
+        setStoredWatermarks((marks) => ({
+          ...marks,
+          [key]: hiddenCount <= SESSION_WATERMARK_BASE ? Infinity : watermark + SESSION_WATERMARK_BASE,
+        }));
+        setWatermarkMotionKey((motionKey) => motionKey + 1);
+      };
+      return { sessionWatermarks, dropWatermarks, overflowToggle, watermarkMotionKey };
+    }
+
     /** 分组树（uiw client.js:3170-3500，原样复刻含水位线与拖拽）。 */
     function SessionTree({ list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds, rowState, onLeaveArchivedOnly, workspaceReady, animationResetKey, usePanelInfo, useRemoteAccess, useSessionAccess, useWorkspaceAccess, onSessionRenameRequest, renderSlot, openSessionMenu, openWorkspaceMenu, useContextMenuTarget, useContextMenu, insertWorkspaceBefore, nestWorkspaces, groupExpansion, setGroupExpanded, setSessionOrder, home, t, revealSessionId, onSessionRevealed, shortcuts }) {
       const panelActive = usePanelInfo((info) => info.activePanelId !== null);
       const statuses = useSessionStatus((s) => s);
       const current = panelActive ? undefined : mainSessionId(list);
       const revealGroup = revealSessionId === undefined || !workspaceReady ? undefined : owningGroupKey(workspaces, revealSessionId);
-      const [storedWatermarks, setStoredWatermarks] = React.useState({});
-      const [watermarkMotionKey, setWatermarkMotionKey] = React.useState(0);
       const [drag, setDrag] = React.useState(null);
       const sessionDropCommitted = React.useRef(false);
       const [workspaceDrag, setWorkspaceDrag] = React.useState(null);
@@ -1653,13 +1683,7 @@ window.__ModuleLoader__.load({
         return false;
       };
       const requiredWatermarks = new Map([...baselines].filter(([key]) => !underFoldedAncestor(key)));
-      const sessionWatermarks = raiseWatermarks(storedWatermarks, requiredWatermarks);
-      if (sessionWatermarks !== storedWatermarks) setStoredWatermarks((marks) => raiseWatermarks(marks, requiredWatermarks));
-      const dropWatermarks = (drop) => {
-        if (!Object.keys(storedWatermarks).some(drop)) return;
-        setStoredWatermarks((marks) => Object.fromEntries(Object.entries(marks).filter(([key]) => !drop(key))));
-        setWatermarkMotionKey((key) => key + 1);
-      };
+      const { sessionWatermarks, dropWatermarks, overflowToggle, watermarkMotionKey } = useWatermarks(requiredWatermarks);
       const withinGroup = (key, root) => {
         for (let owner = key; owner !== undefined; owner = parents.get(owner)) if (owner === root) return true;
         return false;
@@ -1821,17 +1845,7 @@ window.__ModuleLoader__.load({
             className: WB.sessionOverflowButton,
             'data-row-key': 'overflow:' + group.key,
             'aria-expanded': sessionsExpanded,
-            onClick: () => {
-              if (sessionsExpanded) {
-                dropWatermarks((key) => key === group.key);
-                return;
-              }
-              setStoredWatermarks((marks) => ({
-                ...marks,
-                [group.key]: visible.hiddenCount <= SESSION_WATERMARK_BASE ? Infinity : watermark + SESSION_WATERMARK_BASE,
-              }));
-              setWatermarkMotionKey((key) => key + 1);
-            },
+            onClick: () => { overflowToggle(group.key, sessionsExpanded, watermark, visible.hiddenCount); },
           }, sessionsExpanded ? t('sessions.collapse') : t('sessions.expand', { n: visible.hiddenCount })));
         }
         return React.createElement('div', {
@@ -3306,7 +3320,8 @@ window.__ModuleLoader__.load({
     /**
      * 标签模式聚合视图（票 #5）：deriveTagGroups 的渲染器。跨 workspace 聚合、
      * 组头标签名+色点、行级 workspace 标注（SessionNodeItem sourceLabel）、
-     * 水位线（显示更多/收起，模式照 SessionTree）、组展开/收起。
+     * 水位线（显示更多/收起，与 SessionTree 共用 useWatermarks，D1）、
+     * 组展开/收起。
      * 展开态用本地 state（默认全展开）：共享 view store 的 retainAccountKeys
      * 只保留 workspace 键，标签键入 store 会被清掉，故不入 store（重启后
      * 标签组全展开，属选定取舍——跨重启记忆的契约只有模式选择本身）。
@@ -3323,16 +3338,9 @@ window.__ModuleLoader__.load({
       const isExpanded = React.useCallback((key) => collapsedKeys[key] !== true, [collapsedKeys]);
       const matchIds = React.useMemo(() => tagSearchMatchIds(list, workspaces, snapshot, query, remote), [list, workspaces, snapshot, query, remote]);
       const groups = React.useMemo(() => deriveTagGroups(list, workspaces, rowState, statuses, snapshot, { isExpanded, matchIds }), [list, workspaces, rowState, statuses, snapshot, isExpanded, matchIds]);
-      const [storedWatermarks, setStoredWatermarks] = React.useState({});
-      const [watermarkMotionKey, setWatermarkMotionKey] = React.useState(0);
       const baselines = new Map(groups.map((group) => [group.key, Math.max(SESSION_WATERMARK_BASE, requiredWatermark(group.sessions, current, undefined))]));
-      const sessionWatermarks = raiseWatermarks(storedWatermarks, baselines);
-      if (sessionWatermarks !== storedWatermarks) setStoredWatermarks((marks) => raiseWatermarks(marks, baselines));
-      const dropWatermarks = (drop) => {
-        if (!Object.keys(storedWatermarks).some(drop)) return;
-        setStoredWatermarks((marks) => Object.fromEntries(Object.entries(marks).filter(([key]) => !drop(key))));
-        setWatermarkMotionKey((key) => key + 1);
-      };
+      // D1：水位线簇与 SessionTree 共用 useWatermarks（此处基线 = 全量组，无折叠祖先过滤）。
+      const { sessionWatermarks, overflowToggle, watermarkMotionKey } = useWatermarks(baselines);
       const now = Date.now();
       const rowKeys = [];
       const groupRows = [];
@@ -3379,17 +3387,7 @@ window.__ModuleLoader__.load({
             className: WB.sessionOverflowButton,
             'data-row-key': 'overflow:' + group.key,
             'aria-expanded': sessionsExpanded,
-            onClick: () => {
-              if (sessionsExpanded) {
-                dropWatermarks((key) => key === group.key);
-                return;
-              }
-              setStoredWatermarks((marks) => ({
-                ...marks,
-                [group.key]: visible.hiddenCount <= SESSION_WATERMARK_BASE ? Infinity : watermark + SESSION_WATERMARK_BASE,
-              }));
-              setWatermarkMotionKey((key) => key + 1);
-            },
+            onClick: () => { overflowToggle(group.key, sessionsExpanded, watermark, visible.hiddenCount); },
           }, sessionsExpanded ? t('sessions.collapse') : t('sessions.expand', { n: visible.hiddenCount })));
         }
         groupRows.push(React.createElement('div', { key: group.key, className: WB.groupSection }, rows));

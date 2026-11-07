@@ -780,13 +780,14 @@ window.__ModuleLoader__.load({
 
     /**
      * ViewOptionsMenu 的纯模型（uiw client.js:3029-3108 抽取）：items 结构、selectedIds 映射、
-     * onSelect 分派。**T4 预留位**：在 GROUP_ITEMS 的 flat 项之后插「按标签」项（本票不加）。
+     * onSelect 分派。T4：GROUP_ITEMS 扩为 workspace/tree/flat/tag 四项，「按标签」
+     * 与内置三项并列（不跨组：仍在 order-by separator 之前）。
      */
     const GROUP_ITEMS = [
       { id: 'workspace', labelKey: 'groupBy.workspace' },
       { id: 'workspace-tree', labelKey: 'groupBy.workspaceTree' },
       { id: 'flat', labelKey: 'groupBy.flat' },
-      // T4（#5）：{ id: 'tag', labelKey: 'groupBy.tag' } 插在这里（分组 label 之后、排序 separator 之前）。
+      { id: 'tag', labelKey: 'groupBy.tag' },
     ];
     const ORDER_ITEMS = [
       { id: 'manual', labelKey: 'orderBy.manual' },
@@ -1281,6 +1282,7 @@ window.__ModuleLoader__.load({
           case 'workspace': return React.createElement(P.IconFolderCloseRegular, null);
           case 'workspace-tree': return React.createElement(P.IconWorkspaceTreeOutlineRegular, null);
           case 'flat': return React.createElement(P.IconFlatListOutlineRegular, null);
+          case 'tag': return React.createElement(TagIcon, null);
           case 'manual': return React.createElement(P.IconChevronsUpDownOutlineRegular, null);
           case 'updated': return React.createElement(P.IconClockOutlineRegular, null);
           case 'hide-archived': return React.createElement(P.IconArchiveOffOutlineRegular, null);
@@ -2257,7 +2259,11 @@ window.__ModuleLoader__.load({
       const archivedSessionIds = useWorkspaces((state) => state.archivedSessionIds);
       const pinnedSessionIds = useWorkspaces((state) => state.pinnedSessionIds);
       const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied);
-      const groupBy = useStore((s) => s.groupBy);
+      const storedGroupBy = useStore((s) => s.groupBy);
+      const viewMode = useMiniStore(viewModeStore);
+      // 生效分组模式：Host 域恢复 tagMode 时渲染标签聚合视图；否则以共享 view store
+      // 的内置模式为准（切回内置时 actions.setGroupBy 原样写共享实例，内置无缝接续）。
+      const groupBy = viewMode.tagMode ? 'tag' : storedGroupBy;
       const orderBy = useStore((s) => s.orderBy);
       const archivedFilter = useStore((s) => s.archivedFilter ?? 'default');
       const groupExpansion = useStore((s) => s.groupExpansion);
@@ -2448,7 +2454,7 @@ window.__ModuleLoader__.load({
         headerChildren.push(React.createElement('span', {
           key: 'label',
           className: clsx(WB.sectionLabel, WB.wide, searchExpanded && WB.sectionLabelHidden),
-        }, groupBy === 'flat' ? t('section.sessions') : t('section.workspaces')));
+        }, groupBy === 'flat' || groupBy === 'tag' ? t('section.sessions') : t('section.workspaces')));
         headerChildren.push(React.createElement('div', {
           key: 'searchSlot',
           className: clsx(WB.searchSlot, searchExpanded && WB.searchSlotExpanded),
@@ -2513,7 +2519,19 @@ window.__ModuleLoader__.load({
           groupBy,
           orderBy,
           archivedFilter,
-          onGroupPick: actions.setGroupBy,
+          onGroupPick: (mode) => {
+            // T4 模式持久化：内置模式写共享 view store（禁用回退时内置原样接续）
+            // 并同步 Host 域；标签模式只写 Host 域（内置键保持最后一个内置模式）。
+            if (mode === 'tag') {
+              viewModeStore.set({ restored: true, tagMode: true });
+            } else {
+              actions.setGroupBy(mode);
+              viewModeStore.set({ restored: true, tagMode: false });
+            }
+            tagActions.setMode(mode).catch((reason) => {
+              console.warn('session-tags: view mode persist failed:', reason);
+            });
+          },
           onOrderPick: (mode) => { actions.setOrderBy(mode, activeSessionOrders); },
           onArchivedFilterPick: actions.setArchivedFilter,
           t,
@@ -2968,6 +2986,12 @@ window.__ModuleLoader__.load({
     let tagsStore = null;   // { loaded, pool: string[], bySession: Record<sessionId, string[]> }
     let editorRequest = null; // { sessionId, displayTitle } | null
     let tagActions = null;  // apply() 里赋值的 RPC 动作集
+    /**
+     * 视图模式（票 #5）：跨重启记忆走 Host 域（session_tags v2 的 mode 字段），
+     * tagMode 恢复后生效；内置模式仍以共享 view store（dsh.workspace.view.v5）为准，
+     * 两轨并存——内置键里永不出现 'tag' 值，禁用回退时内置读到的永远是合法内置模式。
+     */
+    let viewModeStore = null; // { restored, tagMode }
 
     /** 极简单文档 store（不依赖 dsh-client-store 内部 API；useSyncExternalStore 直连）。 */
     function createMiniStore(initial) {
@@ -3225,6 +3249,7 @@ window.__ModuleLoader__.load({
         // -------------------------------------------------------------------
         tagsStore = createMiniStore({ loaded: false, pool: [], bySession: {} });
         editorRequest = createMiniStore(null);
+        viewModeStore = createMiniStore({ restored: false, tagMode: false });
 
         /** 连接信封展开：{ ok:true, value } → value；失败/异形一律抛 Error。 */
         const callTags = async (method, args) => {
@@ -3259,6 +3284,15 @@ window.__ModuleLoader__.load({
           async createAndAttach(sessionId, name) {
             const value = await callTags('createAndAttach', { sessionId, name });
             patchSession(sessionId, value.pool, value.tags);
+          },
+          /** 视图模式读写（票 #5：Host 域 mode 字段，跨重启记忆）。 */
+          async getMode() {
+            const value = await callTags('getViewMode', {});
+            return value.mode;
+          },
+          async setMode(mode) {
+            const value = await callTags('setViewMode', { mode });
+            return value.mode;
           },
         };
 
@@ -3307,6 +3341,15 @@ window.__ModuleLoader__.load({
         // 首屏全量镜像（异步，失败只降级为「弹层打开时再取」，不阻塞 shadow 渲染）。
         tagActions.refreshAll().catch((error) => {
           console.warn('session-tags: initial tag snapshot failed:', error);
+        });
+
+        // 模式恢复（票 #5：跨重启记忆）：Host 域 mode='tag' 时恢复标签聚合视图；
+        // 其余值不动共享 view store（内置模式以它为准）；失败降级内置模式。
+        tagActions.getMode().then((mode) => {
+          viewModeStore.set({ restored: true, tagMode: mode === 'tag' });
+        }).catch((error) => {
+          viewModeStore.set({ restored: true, tagMode: false });
+          console.warn('session-tags: view mode restore failed:', error);
         });
       },
       /**

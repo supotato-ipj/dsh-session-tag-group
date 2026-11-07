@@ -7,11 +7,13 @@
  * - `sessionExists(sessionId)`：会话存在性谓词（真实环境由 index.js 组合
  *   workspaceRegistry 槽位 + sessionPersistence 持久检查；测试注入集合谓词）。
  *
- * 数据形状（全局 JSON，v1）：
- *   { v: 1, tags: string[], bySession: Record<sessionId, string[]> }
+ * 数据形状（全局 JSON，v2）：
+ *   { v: 2, tags: string[], bySession: Record<sessionId, string[]>, mode: string }
  * - `tags`：全局标签池（不按 workspace 隔离），随打随建，按创建顺序稳定；
  *   一期不做池条目回收（无引用的标签保留，供再次勾选）。
  * - `bySession`：会话 → 标签名数组（与池同序约束之外保持设置顺序）。
+ * - `mode`：会话浏览区视图模式（VIEW_MODES 之一），票 #5 起与标签数据同域持久化
+ *   （Client 经 /session-tags 的 getViewMode/setViewMode 读写）。
  * - 颜色不入库：一期色点为固定映射，由 Client 纯逻辑按标签名派生（可测、可改）。
  *
  * 清理语义（spec 17/18 条 + 票 #4）：
@@ -25,8 +27,19 @@
  * 不覆盖「读-改-写」之间的交错）。
  */
 
-/** 全局文档版本。改形状时 +1 并在 normalizeLegacyGlobal 里补迁移分支。 */
-const TAG_GLOBAL_VERSION = 1;
+/** 全局文档版本。改形状时 +1 并在 normalizeLegacyGlobal（tagGlobalSchema.parse）里补迁移分支。 */
+const TAG_GLOBAL_VERSION = 2;
+
+/**
+ * 会话浏览区视图模式全集（票 #5）：内置三模式 + 标签模式。
+ * mode 字段取值限定于此；domain 版本升级须在 TAG_DOMAIN_SPEC.compatibleVersions
+ * 声明旧版本（storage json backend 对落盘 unit 版本戳做校验，缺声明 →
+ * version-mismatch → 插件激活失败）。
+ */
+export const VIEW_MODES = ['workspace', 'workspace-tree', 'flat', 'tag'];
+
+/** 视图模式默认值（内置默认分组）。 */
+export const DEFAULT_VIEW_MODE = 'workspace';
 
 /** 会话/标签名的去重键：小写化（首见写法保留）。 */
 function tagKey(name) {
@@ -41,7 +54,7 @@ export function normalizeTagName(raw) {
 
 /** 空的全局文档（首次写入与损坏兜底同形）。 */
 export function EMPTY_TAG_GLOBAL() {
-  return { v: TAG_GLOBAL_VERSION, tags: [], bySession: {} };
+  return { v: TAG_GLOBAL_VERSION, tags: [], bySession: {}, mode: DEFAULT_VIEW_MODE };
 }
 
 /**
@@ -64,7 +77,9 @@ export const tagGlobalSchema = {
     }
     const tags = normalizePool(value.tags);
     const bySession = normalizeBySession(value.bySession, tags);
-    return { v: TAG_GLOBAL_VERSION, tags, bySession };
+    // 迁移分支：v1 文档无 mode → 补默认；非法 mode 同样规整回默认（宽进，open 永不炸）。
+    const mode = VIEW_MODES.includes(value.mode) ? value.mode : DEFAULT_VIEW_MODE;
+    return { v: TAG_GLOBAL_VERSION, tags, bySession, mode };
   },
 };
 
@@ -224,6 +239,31 @@ export function createTagService({ domain, sessionExists }) {
     },
 
     /**
+     * 视图模式读取（票 #5：模式选择跨重启记忆，与标签数据同域）。
+     */
+    getViewMode() {
+      return enqueue(async () => {
+        const doc = readGlobal(domain);
+        return { mode: doc.mode };
+      });
+    },
+
+    /**
+     * 视图模式写入：只改 mode 字段，不动标签数据；非法取值拒绝。
+     */
+    setViewMode({ mode }) {
+      return enqueue(async () => {
+        if (!VIEW_MODES.includes(mode)) {
+          throw invalidArgs('setViewMode 需要 mode ∈ ' + VIEW_MODES.join('/'));
+        }
+        const doc = readGlobal(domain);
+        doc.mode = mode;
+        await persist(doc);
+        return { mode: doc.mode };
+      });
+    },
+
+    /**
      * 设置会话标签集（勾选即增、取消即移除的原子入口）。
      * 未知标签随打随建；会话不存在时拒绝（拒绝对死会话写入）。
      */
@@ -318,6 +358,9 @@ function invalidArgs(message) {
 export const TAG_DOMAIN_SPEC = {
   name: 'session_tags',
   version: TAG_GLOBAL_VERSION,
+  // storage json backend 按 unit 版本戳校验（v1 的旧落盘必须能开，否则
+  // version-mismatch 直接炸插件激活）；首次写盘后 unit 自动升到 v2 戳。
+  compatibleVersions: [1],
   tables: {},
   global: {
     schema: tagGlobalSchema,

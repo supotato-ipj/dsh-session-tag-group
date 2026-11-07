@@ -7,15 +7,17 @@
  * 处理器内部自捕获异常——连接层对抛错只会回 500「handler failure」，客户端拿不到
  * 结构化错误码；信封化后 Client 能按 code 分支（如 session-missing 时提示刷新）。
  *
- * 方法面（T4 契约，T4 的模式持久化可在此通道追加方法，勿改已有语义）：
+ * 方法面（T4 契约，勿改已有语义）：
  *   listPool       {}                            → { pool }
  *   listSessionTags { sessionId }                → { tags }
  *   listAll        {}                            → { pool, bySession }
  *   setSessionTags  { sessionId, tags }          → { tags, pool }
  *   createAndAttach { sessionId, name }          → { tag, tags, pool }
  *   forgetSession   { sessionId }                → { pruned }
+ *   getViewMode    {}                            → { mode }        （票 #5）
+ *   setViewMode    { mode }                      → { mode }        （票 #5）
  */
-import { TagServiceError } from './tag-store.js';
+import { TagServiceError, VIEW_MODES } from './tag-store.js';
 
 const CODE_PREFIX = 'session-tags';
 
@@ -39,6 +41,8 @@ function isStringArray(value) {
 const PAYLOAD_CHECKS = {
   listPool: () => null,
   listAll: () => null,
+  getViewMode: () => null,
+  setViewMode: (args) => (VIEW_MODES.includes(args?.mode) ? null : '需要 mode ∈ ' + VIEW_MODES.join('/')),
   listSessionTags: (args) => (isNonEmptyString(args?.sessionId) ? null : '需要 sessionId'),
   setSessionTags: (args) => {
     if (!isNonEmptyString(args?.sessionId)) return '需要 sessionId';

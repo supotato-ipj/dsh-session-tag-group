@@ -143,3 +143,25 @@ describe('handleTagRpc：错误信封', () => {
     expect(typeof result.error.message).toBe('string');
   });
 });
+
+describe('视图模式方法（票 #5 / T4 契约扩展，同一通道同一信封）', () => {
+  it('getViewMode 默认 workspace；setViewMode 写入并回读', async () => {
+    const service = await makeService();
+    expect(await handleTagRpc(service, 'getViewMode', {})).toEqual({ ok: true, value: { mode: 'workspace' } });
+    expect(await handleTagRpc(service, 'setViewMode', { mode: 'tag' })).toEqual({ ok: true, value: { mode: 'tag' } });
+    expect(await handleTagRpc(service, 'getViewMode', {})).toEqual({ ok: true, value: { mode: 'tag' } });
+  });
+
+  it('setViewMode 非法 mode → invalid-args；缺 mode 同样拒绝', async () => {
+    const service = await makeService();
+    expect((await handleTagRpc(service, 'setViewMode', { mode: 'bogus' })).error.code).toBe('session-tags/invalid-args');
+    expect((await handleTagRpc(service, 'setViewMode', {})).error.code).toBe('session-tags/invalid-args');
+  });
+
+  it('serveTagRpc 全链：POST /session-tags/setViewMode 成功信封', async () => {
+    const dispatch = await makeDispatch();
+    const outcome = await serveTagRpc(dispatch, 'setViewMode', JSON.stringify({ type: 'client-request', rpcId: 'r-5', method: 'setViewMode', payload: { mode: 'tag' } }));
+    expect(outcome.status).toBe(200);
+    expect(JSON.parse(outcome.body)).toEqual({ type: 'server-response', rpcId: 'r-5', result: { ok: true, value: { mode: 'tag' } } });
+  });
+});

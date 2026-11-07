@@ -569,6 +569,64 @@ window.__ModuleLoader__.load({
       return sessionStatuses(node, t).filter((status) => !(node.archived && (status.state === 'done' || status.state === 'idle')));
     }
 
+    /**
+     * 添加工作区目录流的状态机（uiw client.js:2740-2900 语义抽取）：
+     * state = {flowOpen, pickingFolder, errorOpen, modalError}；reduce 返回
+     * {state, effects}，effects 由组件执行（close=收外层菜单、pick=交外层采纳后续）。
+     * 语义：openFlow 先收菜单再清错误开流（2815-2820）；采纳忙时流保持打开（2831-2849）；
+     * 成功关流交 onPick、失败关流进错误模态（2807-2814）；占位者消失即收流（2753-2755）。
+     */
+    function createPickFlowMachine() {
+      const initial = () => ({ flowOpen: false, pickingFolder: false, errorOpen: false, modalError: null });
+      const flowBusy = (state) => state.flowOpen || state.pickingFolder;
+      const reduce = (state, event) => {
+        switch (event.type) {
+          case 'openFlow':
+          case 'selectAdd':
+            return { state: { ...state, flowOpen: true, errorOpen: false, modalError: null }, effects: [{ type: 'close' }] };
+          case 'pickSubmitted':
+            return { state: { ...state, pickingFolder: true }, effects: [] };
+          case 'adoptSucceeded':
+            return { state: { ...state, flowOpen: false, pickingFolder: false }, effects: [{ type: 'pick', workspaceId: event.workspaceId }] };
+          case 'adoptFailed':
+            return { state: { ...state, flowOpen: false, pickingFolder: false, errorOpen: true, modalError: event.message }, effects: [] };
+          case 'flowCancel':
+          case 'flowUnavailable':
+            return { state: { ...state, flowOpen: false }, effects: [] };
+          case 'flowError':
+            return { state: { ...state, flowOpen: false, errorOpen: true, modalError: event.message }, effects: [] };
+          case 'errorDismiss':
+            return { state: { ...state, errorOpen: false, modalError: null }, effects: [] };
+          default:
+            return { state, effects: [] };
+        }
+      };
+      /** 仅当 picker 开着、add 是唯一菜单入口且不忙时自动直开目录流（uiw client.js:2821-2830）。 */
+      const autoOpenShouldFire = ({ open, addIsTheOnlyEntry, flowBusy: busy }) => open === true && addIsTheOnlyEntry === true && busy !== true;
+      return { initial, flowBusy, reduce, autoOpenShouldFire };
+    }
+
+    /** workspace.add 快捷键三补丁（uiw client.js:39-71 controls.add/closeAdd/directoryBusy 语义）。 */
+    function shortcutPatchForAdd(snapshot) {
+      return snapshot.directoryBusy ? {} : { addRequested: true };
+    }
+
+    function shortcutPatchForCloseAdd() {
+      return { addRequested: false };
+    }
+
+    function shortcutPatchForDirectoryBusy(busy) {
+      return { directoryBusy: busy };
+    }
+
+    /** 把补丁写入快捷键 store（内置或探测到的共享 store）；缺读取/写入面时安全跳过。 */
+    function applyShortcutPatch(store, patch) {
+      if (store === null || typeof store !== 'object') return false;
+      if (typeof store.getSnapshot !== 'function' || typeof store.set !== 'function') return false;
+      store.set({ ...store.getSnapshot(), ...patch });
+      return true;
+    }
+
     /** Show the blank row plus the first `watermark` non-blank rows（uiw client.js:2953-2964）。 */
     function watermarkRows(sessions, watermark) {
       let count = 0;
@@ -2274,6 +2332,11 @@ window.__ModuleLoader__.load({
         hoverTimeLabel,
         createdLabel,
         hoverStatuses,
+        createPickFlowMachine,
+        shortcutPatchForAdd,
+        shortcutPatchForCloseAdd,
+        shortcutPatchForDirectoryBusy,
+        applyShortcutPatch,
         orderByRecency,
         reconcileManualOrder,
         pinCurrentBlank,

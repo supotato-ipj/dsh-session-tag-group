@@ -154,3 +154,95 @@ describe('hoverStatuses（悬停卡状态行，uiw 2401-2402）', () => {
     expect(running.map((s) => s.state)).toEqual(['ongoing']);
   });
 });
+
+describe('pickFlowMachine（添加工作区目录流状态机，uiw 2740-2900 语义抽取）', () => {
+  const machine = logic.createPickFlowMachine();
+
+  it('初始：目录流与错误模态都关闭', () => {
+    expect(machine.initial()).toEqual({ flowOpen: false, pickingFolder: false, errorOpen: false, modalError: null });
+  });
+
+  it('openFlow：清错误、开目录流，并先触发外层 onClose（先收菜单再开流）', () => {
+    const current = { flowOpen: false, pickingFolder: false, errorOpen: true, modalError: 'x' };
+    const next = machine.reduce(current, { type: 'openFlow' });
+    expect(next.state).toEqual({ flowOpen: true, pickingFolder: false, errorOpen: false, modalError: null });
+    expect(next.effects).toEqual([{ type: 'close' }]);
+  });
+
+  it('selectAdd 与 openFlow 同通道（菜单「添加工作区…」项）', () => {
+    const next = machine.reduce(machine.initial(), { type: 'selectAdd' });
+    expect(next.state.flowOpen).toBe(true);
+    expect(next.effects).toEqual([{ type: 'close' }]);
+  });
+
+  it('pickSubmitted：进入 picking 忙态（采纳期间目录流保持打开且忙）', () => {
+    const open = machine.reduce(machine.initial(), { type: 'openFlow' }).state;
+    const next = machine.reduce(open, { type: 'pickSubmitted' });
+    expect(next.state.pickingFolder).toBe(true);
+    expect(next.state.flowOpen).toBe(true);
+    expect(machine.flowBusy(next.state)).toBe(true);
+  });
+
+  it('adoptSucceeded：关流并触发 onPick（workspaceId 交外层 startSession）', () => {
+    const open = machine.reduce(machine.initial(), { type: 'openFlow' }).state;
+    const picking = machine.reduce(open, { type: 'pickSubmitted' }).state;
+    const next = machine.reduce(picking, { type: 'adoptSucceeded', workspaceId: 'w9' });
+    expect(next.state).toEqual({ flowOpen: false, pickingFolder: false, errorOpen: false, modalError: null });
+    expect(next.effects).toEqual([{ type: 'pick', workspaceId: 'w9' }]);
+  });
+
+  it('adoptFailed：关流、开错误模态并展示原因（重试入口在模态上）', () => {
+    const open = machine.reduce(machine.initial(), { type: 'openFlow' }).state;
+    const picking = machine.reduce(open, { type: 'pickSubmitted' }).state;
+    const next = machine.reduce(picking, { type: 'adoptFailed', message: '无法打开' });
+    expect(next.state).toEqual({ flowOpen: false, pickingFolder: false, errorOpen: true, modalError: '无法打开' });
+    expect(next.effects).toEqual([]);
+  });
+
+  it('flowCancel / flowError：取消只关流；错误关流并进模态', () => {
+    const open = machine.reduce(machine.initial(), { type: 'openFlow' }).state;
+    expect(machine.reduce(open, { type: 'flowCancel' }).state.flowOpen).toBe(false);
+    const errored = machine.reduce(open, { type: 'flowError', message: '列表失败' });
+    expect(errored.state).toEqual({ flowOpen: false, pickingFolder: false, errorOpen: true, modalError: '列表失败' });
+  });
+
+  it('flowUnavailable：流开着但占位者消失时收流（无静默僵尸流）', () => {
+    const open = machine.reduce(machine.initial(), { type: 'openFlow' }).state;
+    const next = machine.reduce(open, { type: 'flowUnavailable' });
+    expect(next.state.flowOpen).toBe(false);
+  });
+
+  it('autoOpen 条件：picker 开着、add 是唯一入口且不忙（uiw 2821-2830）', () => {
+    expect(machine.autoOpenShouldFire({ open: true, addIsTheOnlyEntry: true, flowBusy: false })).toBe(true);
+    expect(machine.autoOpenShouldFire({ open: true, addIsTheOnlyEntry: true, flowBusy: true })).toBe(false);
+    expect(machine.autoOpenShouldFire({ open: true, addIsTheOnlyEntry: false, flowBusy: false })).toBe(false);
+    expect(machine.autoOpenShouldFire({ open: false, addIsTheOnlyEntry: true, flowBusy: false })).toBe(false);
+  });
+
+  it('errorDismiss：关模态清错误（重试按钮另走 openFlow）', () => {
+    const errored = machine.reduce(machine.initial(), { type: 'flowError', message: 'x' }).state;
+    expect(machine.reduce(errored, { type: 'errorDismiss' }).state).toEqual({ flowOpen: false, pickingFolder: false, errorOpen: false, modalError: null });
+  });
+});
+
+describe('shortcutPatches（workspace.add 快捷键 store 补丁，uiw 39-71 语义）', () => {
+  it('requestAdd：空闲时置 addRequested=true；directoryBusy 时 no-op', () => {
+    expect(logic.shortcutPatchForAdd({ directoryBusy: false })).toEqual({ addRequested: true });
+    expect(logic.shortcutPatchForAdd({ directoryBusy: true })).toEqual({});
+  });
+
+  it('closeAdd / directoryBusy 补丁语义', () => {
+    expect(logic.shortcutPatchForCloseAdd()).toEqual({ addRequested: false });
+    expect(logic.shortcutPatchForDirectoryBusy(true)).toEqual({ directoryBusy: true });
+    expect(logic.shortcutPatchForDirectoryBusy(false)).toEqual({ directoryBusy: false });
+  });
+
+  it('applyShortcutPatch：无 getSnapshot/set 的 store 安全跳过（探测回退路径）', () => {
+    expect(logic.applyShortcutPatch(null, { addRequested: true })).toBe(false);
+    expect(logic.applyShortcutPatch({}, { addRequested: true })).toBe(false);
+    const calls = [];
+    const store = { getSnapshot: () => ({ addRequested: false, directoryBusy: false }), set: (v) => calls.push(v) };
+    expect(logic.applyShortcutPatch(store, logic.shortcutPatchForAdd(store.getSnapshot()))).toBe(true);
+    expect(calls).toEqual([{ addRequested: true, directoryBusy: false }]);
+  });
+});

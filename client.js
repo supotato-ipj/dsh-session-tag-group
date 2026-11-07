@@ -19,7 +19,15 @@
  * 重命名/删除对话框、添加工作区按钮、会话/workspace 悬停卡。归档/置顶/会话重命名/
  * 归档确认框/行 toast 由内置的独立 slot 注册继续供给（见「子座位保活」），本插件通过
  * 共享 store 探测（快捷键/重命名请求/工作区动作请求/toast 通道）与共享 view store
- * 句柄（归档 toast 的筛选动作、pin 本地序）与内置保持一致。**不做**（T3/T4）：标签任何内容。
+ * 句柄（归档 toast 的筛选动作、pin 本地序）与内置保持一致。T3（票 #4）增量——
+ * 标签数据面（/session-tags RPC + 本地镜像）、行首色点、「编辑标签」弹层与菜单项。
+ * T4（票 #5）增量——标签模式聚合视图：分组计算纯函数（deriveTagGroups/
+ * tagSearchMatchIds）、ViewOptionsMenu「按标签」项（GROUP_ITEMS 四项）、
+ * TagGroupsView 渲染器（置顶段→标签组→未标签段、组头色点、行级 workspace
+ * 标注、搜索在分组结果内过滤、水位线）、模式选择 Host 域持久化
+ * （session_tags v2 的 mode 字段 + getViewMode/setViewMode；内置模式仍写
+ * 共享 view store 键 dsh.workspace.view.v5）。内置默认三模式行为不变，标签
+ * 模式只增量。
  *
  * 子座位保活（07 简报 §1）：本注册原样声明内置的五个 children（directoryFlow / session.row.action /
  * session.row.leading / session.row.trailing / session.row.hover），并以相同 props renderSlot——
@@ -1438,7 +1446,7 @@ window.__ModuleLoader__.load({
      * T1 差异：不包 HoverCard（悬停卡 = T2）；行首/行尾装饰位与「...」菜单、快捷动作列表
      * （renderSlot('sidebar.workspaces.session.row.action')）原样保留。
      */
-    function SessionNodeItem({ node, currentId, now, onOpen, onRenameRequest, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, onReveal, drag, home, useSessionAccess, t }) {
+    function SessionNodeItem({ node, currentId, now, onOpen, onRenameRequest, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, onReveal, drag, home, useSessionAccess, sourceLabel, t }) {
       const { getTriggerProps } = useContextMenu();
       const row = node;
       const title = displayTitle(node, t);
@@ -1527,6 +1535,12 @@ window.__ModuleLoader__.load({
           },
         }, title),
         !row.blank && React.createElement('span', { className: RW.rowResting },
+          // T4：标签模式的行级 workspace 标注（spec 第 15 条）——resting 区、时间位之前；
+          // 仅标签模式传入 sourceLabel，内置三模式不传即原样。
+          sourceLabel !== undefined && sourceLabel !== '' && React.createElement('span', {
+            style: { flex: '0 0 auto', maxWidth: '40%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '11px', lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)', marginRight: '6px' },
+            title: sourceLabel,
+          }, sourceLabel),
           React.createElement('span', {
             className: clsx(RW.time, primaryStatus.trailingLabel === undefined && RW.timestamp),
             'aria-hidden': primaryStatus.trailingLabel === undefined ? undefined : true,
@@ -2275,6 +2289,15 @@ window.__ModuleLoader__.load({
         }
         open(sessionId);
       };
+      // 标签模式行打开：沿用归档守卫；带查询时打开后清空搜索（对齐内置
+      // 搜索结果打开路径的收尾语义；无需 reveal——过滤树本身就含目标行）。
+      const openInTagGroups = (sessionId) => {
+        guardedOpen(sessionId);
+        if (normalizedQuery !== '') {
+          setQuery('');
+          changeSearchExpanded(false);
+        }
+      };
       const leaveArchivedOnly = () => {
         actions.setArchivedFilter('default');
       };
@@ -2575,7 +2598,7 @@ window.__ModuleLoader__.load({
       }));
       const listChildren = [];
       if (wide) {
-        if (normalizedQuery !== '') {
+        if (normalizedQuery !== '' && groupBy !== 'tag') {
           listChildren.push(React.createElement(SearchResults, {
             key: 'search',
             usePanelInfo,
@@ -2590,6 +2613,30 @@ window.__ModuleLoader__.load({
             query: normalizedQuery,
             remote: remoteSearch,
             resultLimit: searchResultLimit,
+            t,
+          }));
+        } else if (groupBy === 'tag') {
+          // T4 标签模式（含搜索态）：聚合视图本身承载「在分组结果内过滤」。
+          listChildren.push(React.createElement(TagGroupsView, {
+            key: 'tags',
+            usePanelInfo,
+            useSessionAccess,
+            useSessionStatus,
+            list,
+            home,
+            workspaces,
+            rowState,
+            onLeaveArchivedOnly: leaveArchivedOnly,
+            workspaceReady,
+            animationResetKey: groupBy + '/' + orderBy + '/' + archivedFilter,
+            open: openInTagGroups,
+            onSessionRenameRequest: requestSessionRename,
+            renderSlot,
+            openSessionMenu,
+            useContextMenuTarget,
+            useContextMenu,
+            query: normalizedQuery,
+            remote: remoteSearch,
             t,
           }));
         } else if (groupBy === 'flat') {
@@ -2815,6 +2862,9 @@ window.__ModuleLoader__.load({
       'groupBy.workspace': '按工作区',
       'groupBy.workspaceTree': '按工作区树',
       'groupBy.flat': '单列表',
+      'groupBy.tag': '按标签',
+      'group.pinned': '置顶',
+      'group.untagged': '未标签',
       'orderBy.label': '排序方式',
       'orderBy.manual': '手动排序',
       'orderBy.updated': '最近更新',
@@ -2902,6 +2952,9 @@ window.__ModuleLoader__.load({
       'groupBy.workspace': 'WorkSpace',
       'groupBy.workspaceTree': 'Workspace Tree',
       'groupBy.flat': 'In one list',
+      'groupBy.tag': 'By tag',
+      'group.pinned': 'Pinned',
+      'group.untagged': 'Untagged',
       'orderBy.label': 'Order by',
       'orderBy.manual': 'Manual',
       'orderBy.updated': 'Last updated',
@@ -3185,6 +3238,147 @@ window.__ModuleLoader__.load({
             'aria-label': t('tags.add.aria'),
           }, t('tags.add')),
         ),
+      );
+    }
+
+    /**
+     * 标签分组头行（票 #5）：tag 组 = 色点（tagColorOf 派生，T3 同款）+ 标签名；
+     * 置顶段 = 图钉 + 本地化「置顶」；未标签段 = 队列图标 + 本地化「未标签」。
+     * 行样式复用内置编译类（RW.projectRow 系）；containsCurrent 时图标格点亮
+     * （folderActive 同款高亮语义）。分组头不含 workspace 菜单/新会话按钮
+     * （标签组没有对应动作面）。
+     */
+    function TagGroupHeader({ group, t }) {
+      return React.createElement('div', {
+        className: clsx(RW.projectRow),
+        'data-row-key': 'group:' + group.key,
+        role: 'treeitem',
+        'aria-expanded': group.expanded,
+        onClick: group.onToggle,
+      },
+        React.createElement('span', { className: clsx(RW.slot, RW.folder, group.containsCurrent && RW.folderActive) },
+          group.kind === 'tag'
+            ? React.createElement('span', { 'aria-hidden': true, style: { width: '10px', height: '10px', borderRadius: '50%', background: group.color, display: 'inline-block', flex: '0 0 auto' } })
+            : group.kind === 'pinned'
+              ? React.createElement(P.IconPinFillRegular, { size: 14 })
+              : React.createElement(P.IconQueueOutlineRegular, { size: 14 })),
+        React.createElement('span', { className: clsx(RW.slot, RW.chevron) },
+          React.createElement(P.IconTriangleRightFillRegular, { className: clsx(RW.arrow, group.expanded && RW.arrowOpen) })),
+        React.createElement('span', { className: RW.projectText },
+          React.createElement('span', { className: RW.title },
+            group.kind === 'pinned' ? t('group.pinned') : group.kind === 'untagged' ? t('group.untagged') : group.label)),
+      );
+    }
+
+    /**
+     * 标签模式聚合视图（票 #5）：deriveTagGroups 的渲染器。跨 workspace 聚合、
+     * 组头标签名+色点、行级 workspace 标注（SessionNodeItem sourceLabel）、
+     * 水位线（显示更多/收起，模式照 SessionTree）、组展开/收起。
+     * 展开态用本地 state（默认全展开）：共享 view store 的 retainAccountKeys
+     * 只保留 workspace 键，标签键入 store 会被清掉，故不入 store（重启后
+     * 标签组全展开，属选定取舍——跨重启记忆的契约只有模式选择本身）。
+     * 搜索（query/remote）经 tagSearchMatchIds 在分组结果内过滤；无匹配显示
+     * 内置「无匹配会话」文案。不提供拖拽排序（组内/组间序由纯函数固定，
+     * orderBy 菜单在标签模式不参与——spec 固定按最近活跃）。
+     */
+    function TagGroupsView({ list, workspaces, rowState, useSessionStatus, usePanelInfo, open, home, onLeaveArchivedOnly, workspaceReady, animationResetKey, useSessionAccess, onSessionRenameRequest, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, query, remote, t }) {
+      const panelActive = usePanelInfo((info) => info.activePanelId !== null);
+      const statuses = useSessionStatus((s) => s);
+      const snapshot = useMiniStore(tagsStore);
+      const current = panelActive ? undefined : mainSessionId(list);
+      const [collapsedKeys, setCollapsedKeys] = React.useState({});
+      const isExpanded = React.useCallback((key) => collapsedKeys[key] !== true, [collapsedKeys]);
+      const matchIds = React.useMemo(() => tagSearchMatchIds(list, workspaces, snapshot, query, remote), [list, workspaces, snapshot, query, remote]);
+      const groups = React.useMemo(() => deriveTagGroups(list, workspaces, rowState, statuses, snapshot, { isExpanded, matchIds }), [list, workspaces, rowState, statuses, snapshot, isExpanded, matchIds]);
+      const [storedWatermarks, setStoredWatermarks] = React.useState({});
+      const [watermarkMotionKey, setWatermarkMotionKey] = React.useState(0);
+      const baselines = new Map(groups.map((group) => [group.key, Math.max(SESSION_WATERMARK_BASE, requiredWatermark(group.sessions, current, undefined))]));
+      const sessionWatermarks = raiseWatermarks(storedWatermarks, baselines);
+      if (sessionWatermarks !== storedWatermarks) setStoredWatermarks((marks) => raiseWatermarks(marks, baselines));
+      const dropWatermarks = (drop) => {
+        if (!Object.keys(storedWatermarks).some(drop)) return;
+        setStoredWatermarks((marks) => Object.fromEntries(Object.entries(marks).filter(([key]) => !drop(key))));
+        setWatermarkMotionKey((key) => key + 1);
+      };
+      const now = Date.now();
+      const rowKeys = [];
+      const groupRows = [];
+      for (const group of groups) {
+        const watermark = sessionWatermarks[group.key] ?? SESSION_WATERMARK_BASE;
+        const collapsed = watermarkRows(group.sessions, baselines.get(group.key) ?? SESSION_WATERMARK_BASE);
+        const visible = watermarkRows(group.sessions, watermark);
+        const sessionsExpanded = visible.hiddenCount === 0;
+        rowKeys.push('group:' + group.key);
+        const rows = [
+          React.createElement(TagGroupHeader, {
+            key: 'header',
+            group: { ...group, onToggle: () => {
+              if (group.expanded) dropWatermarks((key) => key === group.key);
+              setCollapsedKeys((state) => ({ ...state, [group.key]: group.expanded }));
+            } },
+            t,
+          }),
+        ];
+        for (const node of visible.rows) {
+          rowKeys.push('session:' + node.id);
+          rows.push(React.createElement(SessionNodeItem, {
+            key: node.id,
+            node,
+            currentId: current,
+            now,
+            home,
+            onOpen: open,
+            onRenameRequest: onSessionRenameRequest,
+            renderSlot,
+            openSessionMenu,
+            useContextMenuTarget,
+            useContextMenu,
+            useSessionAccess,
+            sourceLabel: node.workspace === '' ? t('group.ungrouped') : node.workspace,
+            t,
+          }));
+        }
+        if (collapsed.hiddenCount > 0) {
+          rowKeys.push('overflow:' + group.key);
+          rows.push(React.createElement('button', {
+            key: 'overflow',
+            type: 'button',
+            className: WB.sessionOverflowButton,
+            'data-row-key': 'overflow:' + group.key,
+            'aria-expanded': sessionsExpanded,
+            onClick: () => {
+              if (sessionsExpanded) {
+                dropWatermarks((key) => key === group.key);
+                return;
+              }
+              setStoredWatermarks((marks) => ({
+                ...marks,
+                [group.key]: visible.hiddenCount <= SESSION_WATERMARK_BASE ? Infinity : watermark + SESSION_WATERMARK_BASE,
+              }));
+              setWatermarkMotionKey((key) => key + 1);
+            },
+          }, sessionsExpanded ? t('sessions.collapse') : t('sessions.expand', { n: visible.hiddenCount })));
+        }
+        groupRows.push(React.createElement('div', { key: group.key, className: WB.groupSection }, rows));
+      }
+      const searchActive = matchIds !== null;
+      return React.createElement(P.HoverCardGroup, {
+        className: clsx(WB.treeBody, WB.wide),
+      },
+        React.createElement(P.AnimatedRows, {
+          key: 'rows',
+          className: clsx(WB.list),
+          role: 'tree',
+          label: t('section.sessions'),
+          rowKeys: rowKeys.length === 0 ? ['empty'] : rowKeys,
+          ready: list.phase === 'ready' && workspaceReady,
+          resetKey: JSON.stringify([animationResetKey, watermarkMotionKey, searchActive]),
+        },
+          rowKeys.length === 0 && (searchActive
+            ? React.createElement('div', { key: 'none', className: WB.empty }, t('search.noMatches'))
+            : React.createElement(EmptySessions, { rowState, onLeaveArchivedOnly, t })),
+          groupRows),
+        React.createElement('span', { key: 'fade', className: WB.fade }),
       );
     }
 

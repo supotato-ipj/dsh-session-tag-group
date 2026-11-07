@@ -944,9 +944,22 @@ window.__ModuleLoader__.load({
       return 4;
     }
 
-    /** 行上悬停兜底文案（悬停卡属 T2；未合入前 title/aria-label 用它）。 */
+    /** 行上悬停兜底文案（悬停卡扩展段补口后与 tagDotTitle 并存：前者全量行、后者 title 串）。 */
     function tagDotTitle(names) {
       return (Array.isArray(names) ? names : []).join(' · ');
+    }
+
+    /**
+     * 悬停卡扩展段（`sidebar.session.row.hover` 占用者，票 #4 AC 补口）的行拼装：
+     * 每个标签一行 { name, color }（色与行色点/组头同源 tagColorOf）；无标签 →
+     * 空数组（占用者渲染 null，扩展段整体不出现）。与行首色点不同：不收敛数量——
+     * 悬停卡有整列空间，全量列出；状态点占用 leading 格导致色点让位时，这里
+     * 是标签名的唯一可见面（SessionHoverContent 的 hover 槽在 showStatus 分支外
+     * 无条件渲染，两处互不耦合）。输入只有标签镜像名（listAll/listSessionTags
+     * 回填的 tagsStore），不读任何行渲染态。
+     */
+    function hoverTagRows(names) {
+      return (Array.isArray(names) ? names : []).map((name) => ({ name, color: tagColorOf(name) }));
     }
 
     /** 标签名规整（Client 侧输入校验；语义与 tag-store.js 同拍）。 */
@@ -3076,9 +3089,10 @@ window.__ModuleLoader__.load({
     /**
      * 行首标签色点（`sidebar.session.row.leading` 占用者）。
      * 优先级取舍：内置状态点占用同一 16px 格时，T1 渲染层根本不调 renderSlot
-     * （SessionNodeItem 的 showStatus 分支）——色点整体让位；悬停仍可见（行菜单
-     * 弹层），且状态点的语义优先级本来更高（00 笔记 §4）。收敛：最多 3 点，
-     * 点径随数量收缩，全量标签名进 title 兜底（悬停卡属 T2）。
+     * （SessionNodeItem 的 showStatus 分支）——色点整体让位；且状态点的语义
+     * 优先级本来更高（00 笔记 §4）。收敛：最多 3 点，点径随数量收缩，全量
+     * 标签名进 title 兜底；悬停卡扩展段（SessionHoverTags，票 #4 AC 补口）
+     * 合入后，标签名的常驻可见面在悬停卡（不随 leading 让位消失）。
      */
     function SessionTagDots({ sessionId }) {
       const snapshot = useMiniStore(tagsStore);
@@ -3094,6 +3108,23 @@ window.__ModuleLoader__.load({
         key: name,
         style: { width: size + 'px', height: size + 'px', borderRadius: '50%', background: tagColorOf(name), flex: '0 0 auto' },
       })));
+    }
+
+    /**
+     * 悬停卡扩展段（`sidebar.session.row.hover` 占用者，票 #4 AC 补口）：
+     * 每标签一行（SessionHoverContent 既有 hoverStatus 行形态，类名映射复用：
+     * 色点 + 名字）。无标签渲染 null——扩展段整体不出现；数据只读 tagsStore
+     * 镜像（listAll 首屏 + 变更响应回填，即 10 号笔记 §2 的 listSessionTags/
+     * listAll 契约），不做悬停即拉取（一期无 Host→Client 推送，弹层打开时
+     * 已有 refreshSessionTags 兜底）。
+     */
+    function SessionHoverTags({ sessionId }) {
+      const snapshot = useMiniStore(tagsStore);
+      const rows = hoverTagRows(snapshot.bySession[sessionId] ?? []);
+      if (rows.length === 0) return null;
+      return React.createElement(React.Fragment, null, rows.map((row) => React.createElement('div', { key: row.name, className: RW.hoverStatus },
+        React.createElement('span', { 'aria-hidden': true, style: { width: '10px', height: '10px', borderRadius: '50%', background: row.color, display: 'inline-block', flex: '0 0 auto' } }),
+        React.createElement('span', null, row.name))));
     }
 
     /** 「编辑标签」菜单项图标（contextMenu.icon keyed 座位，原创图形）。 */
@@ -3500,6 +3531,15 @@ window.__ModuleLoader__.load({
           order: 10,
         }, SessionTagDots));
 
+        // 悬停卡扩展段（票 #4 AC 补口）：标签名进会话悬停卡。hover 槽由
+        // SessionHoverContent 无条件 renderSlot（在 showStatus 分支之外），状态点
+        // 占用 leading 格、色点让位时标签名仍在此可见；无标签本占用者渲染 null。
+        ctx.slots.inject('sidebar.session.row.hover', () => ctx.slots.register({
+          name: 'sidebar.session.row.hover',
+          id: 'session-tags.hover-tags',
+          order: 10,
+        }, SessionHoverTags));
+
         // 「编辑标签」菜单项：走 contextMenus.register（内置会话菜单五项的同款
         // 机制：pin 100 / rename 200 / fork 300 / copy-id 450 / archive 600，
         // 本项 500 落在 copy-id 与 archive 之间）。票面原文写的是
@@ -3608,6 +3648,7 @@ window.__ModuleLoader__.load({
         visibleTagDots,
         tagDotSize,
         tagDotTitle,
+        hoverTagRows,
         normalizeTagName,
         TAG_PINNED_KEY,
         TAG_UNTAGGED_KEY,

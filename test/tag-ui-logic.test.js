@@ -82,3 +82,25 @@ describe('名称规整：Client 与 Host 两端同拍', () => {
     expect(logic.normalizeTagName(undefined)).toBe('');
   });
 });
+
+describe('悬停卡扩展段：标签名行拼装（票 #4 AC 补口）', () => {
+  it('每个标签一行 {name,color}：名字保序、色值来自 TAG_PALETTE', () => {
+    const rows = logic.hoverTagRows(['a', '宁兰路桥']);
+    expect(rows.map((row) => row.name)).toEqual(['a', '宁兰路桥']);
+    expect(rows.length).toBe(2);
+    for (const row of rows) expect(logic.TAG_PALETTE).toContain(row.color);
+  });
+
+  it('无标签 → 空行集（占用者渲染 null，扩展段整体不出现）', () => {
+    expect(logic.hoverTagRows([])).toEqual([]);
+    expect(logic.hoverTagRows(undefined)).toEqual([]);
+  });
+
+  it('状态点占用 leading 格（行首色点让位）时，悬停段仍全量可见：不收敛、与 leading 无耦合', () => {
+    const names = ['t1', 't2', 't3', 't4', 't5'];
+    // 对照：行首色点面在 >3 时收敛（且状态点占用时整个让位不渲染）。
+    expect(logic.visibleTagDots(names).visible.length).toBe(3);
+    // 悬停段没有 16px 限制：同一份标签名全量列出。
+    expect(logic.hoverTagRows(names).map((row) => row.name)).toEqual(names);
+  });
+});

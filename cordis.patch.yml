@@ -1,0 +1,4 @@
+# @local/dsh-session-tags 的 Loader 行：向 Loader 树插入本 bundle。
+# 字段 schema 见 dsh-app-boot lib/index.js:3760-3796；insert 语义 = 追加新行。
+- insert:
+    - { id: dsh-session-tags, name: '@local/dsh-session-tags' }

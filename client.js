@@ -947,6 +947,168 @@ window.__ModuleLoader__.load({
     }
 
     // =====================================================================
+    // 标签模式分组计算（票 #5 / T4，spec「Implementation Decisions」）：
+    // 输入 =（会话快照 + workspaces + rowState + statuses 四元组，对齐内置
+    // deriveGroups 形态）+ 标签映射（listAll 镜像）+ 视图参数；输出 = 有序
+    // 分组树：置顶段 → 标签组（组间按组内最近活跃）→ 未标签段（垫底）。
+    // 归档排除只在这一层做视图排除（sessionVisible），关联数据不动（T3 契约：
+    // bySession 槽位保留，取消归档原样回组）；shadow UI 只是本函数的渲染器。
+    // =====================================================================
+
+    /** 置顶聚合段 / 未标签段 / 标签组的分组键（'@' 前缀避开 workspaceId 键空间）。 */
+    const TAG_PINNED_KEY = '@pinned';
+    const TAG_UNTAGGED_KEY = '@untagged';
+    const TAG_GROUP_KEY_PREFIX = '@tag:';
+
+    /**
+     * 会话标签名对照池子做大小写规整：池内首见写法为准（bySession 与池在正常写
+     * 路径下同拍，此处只兜手改 JSON 的大小写漂移）；池外未知名原样保留。
+     */
+    function canonicalTagNames(names, pool) {
+      const canonical = new Map();
+      for (const name of Array.isArray(pool) ? pool : []) canonical.set(String(name).toLowerCase(), name);
+      return (Array.isArray(names) ? names : []).map((name) => canonical.get(String(name).toLowerCase()) ?? name);
+    }
+
+    /**
+     * 行级 workspace 标注：归属 workspace（sessionIds 权威）的显示名 →
+     * 游离会话回退 cwd 尾段 → 都没有为空串（deriveSearchResults 的 labelOf 同形）。
+     */
+    function workspaceLabelOf(summary, workspaces) {
+      const owner = (Array.isArray(workspaces) ? workspaces : [])
+        .find((workspace) => Array.isArray(workspace?.sessionIds) && workspace.sessionIds.includes(summary.id));
+      return owner !== undefined ? owner.title : workspaceLabel(summary.cwd);
+    }
+
+    /**
+     * 标签模式分组树。view 参数：`isExpanded(key)`（缺省全展开，折叠组只给
+     * sessionCount 不给节点）；`matchIds`（搜索过滤集，缺省不过滤——搜索在
+     * 分组结果内过滤的实现通道，见 tagSearchMatchIds）。
+     */
+    function deriveTagGroups(list, workspaces, rowState, statuses, tags, view = {}) {
+      const archived = new Set(rowState.archivedSessionIds);
+      const pinned = new Set(rowState.pinnedSessionIds);
+      const current = mainSessionId(list);
+      const archivedFilter = rowState.archivedFilter;
+      const matchIds = view.matchIds;
+      const bySession = tags !== null && typeof tags === 'object' ? tags.bySession : undefined;
+      const pool = tags !== null && typeof tags === 'object' ? tags.pool : undefined;
+
+      // 1. 可见集：subagent/blank/归档三态沿用内置 sessionVisible，再叠搜索过滤集。
+      const visible = [];
+      const visibleIds = new Set();
+      for (const id of list.ids) {
+        const summary = list.byId[id];
+        if (summary === undefined) continue;
+        if (matchIds !== undefined && matchIds !== null && !matchIds.has(id)) continue;
+        if (!sessionVisible(summary, current, archived, archivedFilter)) continue;
+        visible.push(summary);
+        visibleIds.add(id);
+      }
+
+      // 2. 置顶段：pinnedSessionIds 顺序（reconcileManualOrder 置顶语义），
+      //    只收可见且非归档的置顶（pin 不覆盖归档）；置顶会话不回标签组重复出现。
+      const pinnedIds = (Array.isArray(rowState.pinnedSessionIds) ? rowState.pinnedSessionIds : [])
+        .filter((id) => visibleIds.has(id) && !archived.has(id));
+      const pinnedSection = new Set(pinnedIds);
+
+      // 3. 标签/未标签分桶：多标签会话进每个所属桶（重复出现是 spec 第 10 条）。
+      const tagBuckets = new Map();
+      const untagged = [];
+      for (const summary of visible) {
+        if (pinnedSection.has(summary.id)) continue;
+        const names = canonicalTagNames(bySession?.[summary.id], pool);
+        if (names.length === 0) untagged.push(summary);
+        else for (const name of names) {
+          const bucket = tagBuckets.get(name);
+          if (bucket === undefined) tagBuckets.set(name, [summary]);
+          else bucket.push(summary);
+        }
+      }
+
+      // 4. 组内序：orderByRecency（updatedAt 降序 + id 升序 tie-break）；
+      //    组间序：组内最近活跃（= 组内 recency 首位的 updatedAt）降序，同分按标签名升序。
+      const tagGroupsData = [...tagBuckets.entries()].map(([name, members]) => ({
+        name,
+        memberIds: orderByRecency(members.map((summary) => summary.id), list.byId),
+      }));
+      tagGroupsData.sort((a, b) => {
+        const rankA = list.byId[a.memberIds[0]]?.updatedAt ?? 0;
+        const rankB = list.byId[b.memberIds[0]]?.updatedAt ?? 0;
+        if (rankA !== rankB) return rankB - rankA;
+        return a.name < b.name ? -1 : 1;
+      });
+
+      // 5. 产出分组树：置顶段 → 标签组 → 未标签段；空段不产出；组内走
+      //    sectionMembers（blank 占位恒组首），节点带行级 workspace 标注。
+      const expandedOf = typeof view.isExpanded === 'function' ? view.isExpanded : () => true;
+      const groups = [];
+      const pushGroup = (key, kind, tagName, memberIds) => {
+        const ordered = sectionMembers(
+          memberIds.map((id) => list.byId[id]).filter((summary) => summary !== undefined),
+          pinned,
+          archived,
+        );
+        const expanded = expandedOf(key) !== false;
+        const group = {
+          key,
+          kind,
+          tagName,
+          color: tagName !== undefined ? tagColorOf(tagName) : undefined,
+          label: tagName ?? '',
+          workspaceId: undefined,
+          cwd: undefined,
+          createdAt: undefined,
+          sessionCount: ordered.length,
+          expanded,
+          containsCurrent: memberIds.includes(current),
+          memberIds: ordered.map((summary) => summary.id),
+        };
+        group.sessions = expanded
+          ? ordered.map((summary) => ({
+              ...sessionNode(summary, list, statuses, pinned, archived),
+              workspace: workspaceLabelOf(summary, workspaces),
+            }))
+          : [];
+        groups.push(group);
+      };
+      if (pinnedIds.length > 0) pushGroup(TAG_PINNED_KEY, 'pinned', undefined, pinnedIds);
+      for (const { name, memberIds } of tagGroupsData) pushGroup(TAG_GROUP_KEY_PREFIX + name, 'tag', name, memberIds);
+      if (untagged.length > 0) {
+        pushGroup(TAG_UNTAGGED_KEY, 'untagged', undefined, orderByRecency(untagged.map((summary) => summary.id), list.byId));
+      }
+      return groups;
+    }
+
+    /**
+     * 标签模式搜索的过滤集：本地匹配（标题 / 行级 workspace 名 / 会话 id /
+     * 标签名，大小写不敏感子串；blank 排除，对齐内置搜索）+ sessions.search
+     * 内容命中并入（可见性由 deriveTagGroups 的 sessionVisible 统一把关）。
+     * 查询为空返回 null（不过滤）。
+     */
+    function tagSearchMatchIds(list, workspaces, tags, query, content) {
+      const q = String(query ?? '').trim().toLowerCase();
+      if (q === '') return null;
+      const bySession = tags !== null && typeof tags === 'object' ? tags.bySession : undefined;
+      const matches = new Set();
+      for (const id of list.ids) {
+        const summary = list.byId[id];
+        if (summary === undefined || summary.blank) continue;
+        const haystack = [
+          sessionTitle(summary),
+          workspaceLabelOf(summary, workspaces),
+          id,
+          ...canonicalTagNames(bySession?.[id], tags !== null && typeof tags === 'object' ? tags.pool : undefined),
+        ].join('\n').toLowerCase();
+        if (haystack.includes(q)) matches.add(id);
+      }
+      for (const item of Array.isArray(content?.items) ? content.items : []) {
+        if (typeof item?.sessionId === 'string') matches.add(item.sessionId);
+      }
+      return matches;
+    }
+
+    // =====================================================================
     // 组件层（浏览器侧；React/primitives 由 apply() 解析进模块级变量）。
     // =====================================================================
 
@@ -3208,6 +3370,13 @@ window.__ModuleLoader__.load({
         tagDotSize,
         tagDotTitle,
         normalizeTagName,
+        TAG_PINNED_KEY,
+        TAG_UNTAGGED_KEY,
+        TAG_GROUP_KEY_PREFIX,
+        canonicalTagNames,
+        workspaceLabelOf,
+        deriveTagGroups,
+        tagSearchMatchIds,
       },
     };
   },

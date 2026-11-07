@@ -1331,28 +1331,30 @@ window.__ModuleLoader__.load({
       });
     }
 
-    /** workspace 头行（uiw client.js:2182-2319；悬停卡留 T2，故直接渲染锚点行）。 */
-    function ProjectRowItem(props) {
+    /** workspace 头行（uiw client.js:2182-2319；悬停卡留 T2，故直接渲染锚点行）。
+     * G1 术语统一：行组件一律 Workspace 系命名（GLOSSARY：workspace 禁用「项目」代称）；
+     * 内置编译类键（RW.projectRow 等）是复刻契约，逐字保留，不随标识符改名。 */
+    function WorkspaceRowItem(props) {
       const workspaceId = props.group.workspaceId;
-      if (workspaceId === undefined) return React.createElement(UngroupedProjectRow, props);
-      return React.createElement(WorkspaceProjectRow, { ...props, workspaceId });
+      if (workspaceId === undefined) return React.createElement(UngroupedWorkspaceRow, props);
+      return React.createElement(GroupedWorkspaceRow, { ...props, workspaceId });
     }
 
-    function UngroupedProjectRow(props) {
+    function UngroupedWorkspaceRow(props) {
       const create = props.useRemoteAccess('session/create');
-      return React.createElement(ProjectRow, { ...props, access: { create, reorder: false } });
+      return React.createElement(WorkspaceRow, { ...props, access: { create, reorder: false } });
     }
 
-    function WorkspaceProjectRow({ workspaceId, ...props }) {
+    function GroupedWorkspaceRow({ workspaceId, ...props }) {
       const { useWorkspaceAccess } = props;
       const access = {
         create: useWorkspaceAccess(workspaceId, 'session/create'),
         reorder: useWorkspaceAccess(workspaceId, 'workspace/insertBefore'),
       };
-      return React.createElement(ProjectRow, { ...props, access });
+      return React.createElement(WorkspaceRow, { ...props, access });
     }
 
-    function ProjectRow({ group, containsCurrentDescendant = false, onToggle, onCreate, drag: offeredDrag, home, newShortcut, t, access, openWorkspaceMenu, useContextMenuTarget, useContextMenu }) {
+    function WorkspaceRow({ group, containsCurrentDescendant = false, onToggle, onCreate, drag: offeredDrag, home, newShortcut, t, access, openWorkspaceMenu, useContextMenuTarget, useContextMenu }) {
       const { getTriggerProps } = useContextMenu();
       const drag = access.reorder ? offeredDrag : undefined;
       const row = group;
@@ -1729,7 +1731,7 @@ window.__ModuleLoader__.load({
           commitWorkspaceDrag(workspaceDrag, { id: workspaceId, half });
         };
         const groupChildren = [
-          React.createElement(ProjectRowItem, {
+          React.createElement(WorkspaceRowItem, {
             key: 'header',
             newShortcut: shortcuts.find((row) => row.id === 'session.new'),
             group,

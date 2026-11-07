@@ -39,6 +39,8 @@ window.__ModuleLoader__.load({
     const NS = 'session-tags';
     /** shadow 目标槽名。 */
     const SLOT_NAME = 'sidebar.workspaces';
+    /** Client→Host 标签通道（与 Host 半 index.js 的 TAG_RPC_CHANNEL 同值）。 */
+    const TAG_RPC_CHANNEL = '/session-tags';
     /**
      * 选举优先级：single 槽低数值者胜（runner lib/client.js:548-549「later registration receives
      * a lower priority」、nextPriority=0 起步）。内置占用者无 priority。取 -10：无论 undefined
@@ -701,6 +703,67 @@ window.__ModuleLoader__.load({
     /** 行显示标题：blank 行显示本地化「新会话」（uiw client.js:2027-2029）。 */
     function displayTitle(node, t) {
       return node.blank ? t('session.new') : (node.title || t('session.untitled'));
+    }
+
+    // =====================================================================
+    // 标签纯逻辑层（票 #4 / T3）：色板映射、行色点收敛、悬停兜底文案、输入规整。
+    // Host 侧同名规整在 tag-store.js（两端一致性由 test/tag-ui-logic.test.js 对账）。
+    // =====================================================================
+
+    /**
+     * 一期固定调色板（spec「Out of Scope」：颜色选择器二期；映射放纯逻辑层可测）。
+     * 10 个 HSL 色：饱和度/亮度取中间值，在侧栏明暗两套主题下都可读。
+     */
+    const TAG_PALETTE = [
+      'hsl(0 62% 52%)',
+      'hsl(18 70% 50%)',
+      'hsl(35 75% 48%)',
+      'hsl(70 55% 42%)',
+      'hsl(120 45% 42%)',
+      'hsl(160 50% 40%)',
+      'hsl(190 55% 42%)',
+      'hsl(215 60% 50%)',
+      'hsl(260 55% 55%)',
+      'hsl(310 55% 52%)',
+    ];
+
+    /** 确定性字符串哈希（djb2，UTF-16 码元逐个折叠）——同名恒同色、无随机源。 */
+    function tagColorHash(name) {
+      let hash = 5381;
+      const text = String(name);
+      for (let index = 0; index < text.length; index += 1) {
+        hash = ((hash << 5) + hash + text.charCodeAt(index)) | 0;
+      }
+      return hash >>> 0;
+    }
+
+    /** 标签名 → 固定色点颜色。 */
+    function tagColorOf(name, palette = TAG_PALETTE) {
+      return palette[tagColorHash(name) % palette.length];
+    }
+
+    /** 会话行 16px leading 格的收敛展示：最多 3 个色点，超出收敛为计数（T4 分组头可复用）。 */
+    function visibleTagDots(names, max = 3) {
+      const list = Array.isArray(names) ? names : [];
+      return { visible: list.slice(0, max), overflow: Math.max(0, list.length - max) };
+    }
+
+    /** 点径随数量收缩：1→8px、2→6px、3+→4px（含 1px 间隙收敛在 16px 内）。 */
+    function tagDotSize(count) {
+      if (count <= 1) return 8;
+      if (count === 2) return 6;
+      return 4;
+    }
+
+    /** 行上悬停兜底文案（悬停卡属 T2；未合入前 title/aria-label 用它）。 */
+    function tagDotTitle(names) {
+      return (Array.isArray(names) ? names : []).join(' · ');
+    }
+
+    /** 标签名规整（Client 侧输入校验；语义与 tag-store.js 同拍）。 */
+    function normalizeTagName(raw) {
+      if (typeof raw !== 'string') return '';
+      return raw.replace(/\s+/g, ' ').trim();
     }
 
     // =====================================================================
@@ -2081,6 +2144,16 @@ window.__ModuleLoader__.load({
       'time.months': '{n}个月',
       'time.years': '{n}年',
       'time.ago': '{t}前',
+      'menu.editTags': '编辑标签',
+      'tags.title': '「{name}」的标签',
+      'tags.inputPlaceholder': '新标签，回车即建即挂',
+      'tags.empty': '还没有标签',
+      'tags.loading': '正在读取标签…',
+      'tags.close': '完成',
+      'tags.add': '添加',
+      'tags.add.aria': '创建并挂载该标签',
+      'tags.list.aria': '标签列表',
+      'tags.input.aria': '新标签名',
     };
 
     /** en 词表：与 zh 键集一致（uiw client.js:4880-5000）。 */
@@ -2143,10 +2216,225 @@ window.__ModuleLoader__.load({
       'time.months': '{n}mo',
       'time.years': '{n}y',
       'time.ago': '{t} ago',
+      'menu.editTags': 'Edit tags',
+      'tags.title': 'Tags for “{name}”',
+      'tags.inputPlaceholder': 'New tag — Enter creates and attaches',
+      'tags.empty': 'No tags yet',
+      'tags.loading': 'Loading tags…',
+      'tags.close': 'Done',
+      'tags.add': 'Add',
+      'tags.add.aria': 'Create and attach this tag',
+      'tags.list.aria': 'Tags',
+      'tags.input.aria': 'New tag name',
     };
 
+    // =====================================================================
+    // 标签 UI（票 #4 / T3）：行色点、「编辑标签」弹层、菜单图标。
+    // 状态绑定：tagsStore / editorRequest / tagActions 在 apply() 里赋值
+    // （与 React/P 同一惰性模式）；组件经 useMiniStore 订阅。
+    // =====================================================================
+
+    let tagsStore = null;   // { loaded, pool: string[], bySession: Record<sessionId, string[]> }
+    let editorRequest = null; // { sessionId, displayTitle } | null
+    let tagActions = null;  // apply() 里赋值的 RPC 动作集
+
+    /** 极简单文档 store（不依赖 dsh-client-store 内部 API；useSyncExternalStore 直连）。 */
+    function createMiniStore(initial) {
+      let state = initial;
+      const listeners = new Set();
+      return {
+        getSnapshot: () => state,
+        set: (next) => {
+          if (Object.is(next, state)) return;
+          state = next;
+          for (const listener of [...listeners]) listener();
+        },
+        subscribe: (listener) => {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+      };
+    }
+
+    /** React 绑定：快照 store → 组件。 */
+    function useMiniStore(store) {
+      return React.useSyncExternalStore(store.subscribe, store.getSnapshot);
+    }
+
+    /**
+     * 行首标签色点（`sidebar.session.row.leading` 占用者）。
+     * 优先级取舍：内置状态点占用同一 16px 格时，T1 渲染层根本不调 renderSlot
+     * （SessionNodeItem 的 showStatus 分支）——色点整体让位；悬停仍可见（行菜单
+     * 弹层），且状态点的语义优先级本来更高（00 笔记 §4）。收敛：最多 3 点，
+     * 点径随数量收缩，全量标签名进 title 兜底（悬停卡属 T2）。
+     */
+    function SessionTagDots({ sessionId }) {
+      const snapshot = useMiniStore(tagsStore);
+      const names = snapshot.bySession[sessionId] ?? [];
+      if (names.length === 0) return null;
+      const { visible } = visibleTagDots(names);
+      const size = tagDotSize(names.length);
+      return React.createElement('span', {
+        role: 'presentation',
+        title: tagDotTitle(names),
+        style: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '1px', width: '16px', height: '16px' },
+      }, visible.map((name) => React.createElement('span', {
+        key: name,
+        style: { width: size + 'px', height: size + 'px', borderRadius: '50%', background: tagColorOf(name), flex: '0 0 auto' },
+      })));
+    }
+
+    /** 「编辑标签」菜单项图标（contextMenu.icon keyed 座位，原创图形）。 */
+    function TagIcon() {
+      return React.createElement('svg', {
+        width: 14,
+        height: 14,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        'aria-hidden': true,
+      },
+        React.createElement('path', {
+          d: 'M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l5.704 5.704a2 2 0 0 0 2.828 0l5.704-5.704a2 2 0 0 0 .586-1.414V4.828a2 2 0 0 0-.586-1.414z',
+          stroke: 'currentColor',
+          strokeWidth: 1.8,
+          strokeLinejoin: 'round',
+        }),
+        React.createElement('circle', { cx: 8.5, cy: 8.5, r: 1.3, fill: 'currentColor' }),
+      );
+    }
+
+    /**
+     * 「编辑标签」弹层（shell.overlay 占用者；形态对齐内置 SessionRenameDialog：
+     * 无请求时渲染 null，Modal 由 primitives 供）。勾选即增、取消即移除（每次
+     * 勾选 = 一次 setSessionTags 全集提交，服务端为准后回填 store）；输入框回车
+     * = createAndAttach（IME composition 防误触，对齐 RenameForm）。
+     */
+    function TagEditorOverlay({ t }) {
+      const request = useMiniStore(editorRequest);
+      const snapshot = useMiniStore(tagsStore);
+      const sessionId = request === null ? null : request.sessionId;
+      const [draft, setDraft] = React.useState('');
+      const [pending, setPending] = React.useState(false);
+      const [error, setError] = React.useState(null);
+      const composingRef = React.useRef(false);
+      React.useEffect(() => {
+        setDraft('');
+        setError(null);
+      }, [sessionId]);
+      React.useEffect(() => {
+        if (sessionId === null) return;
+        // 打开即以服务端为准刷新该会话标签（多端/上次未回填的兜底）。
+        tagActions.refreshSessionTags(sessionId).catch(() => {});
+      }, [sessionId]);
+      if (request === null) return null;
+      const sessionTags = snapshot.bySession[request.sessionId] ?? [];
+      const attached = new Set(sessionTags);
+      const close = () => {
+        if (pending) return;
+        editorRequest.set(null);
+      };
+      const toggle = async (name, nextChecked) => {
+        if (pending) return;
+        setPending(true);
+        setError(null);
+        try {
+          const next = nextChecked ? [...sessionTags, name] : sessionTags.filter((existing) => existing !== name);
+          await tagActions.setSessionTags(request.sessionId, next);
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        } finally {
+          setPending(false);
+        }
+      };
+      const create = async () => {
+        const name = normalizeTagName(draft);
+        if (name === '' || pending) return;
+        setPending(true);
+        setError(null);
+        try {
+          await tagActions.createAndAttach(request.sessionId, name);
+          setDraft('');
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+        } finally {
+          setPending(false);
+        }
+      };
+      const title = request.displayTitle ? t('tags.title', { name: request.displayTitle }) : t('menu.editTags');
+      return React.createElement(P.Modal, {
+        open: true,
+        onClose: close,
+        closeLabel: t('tags.close'),
+        title,
+      },
+        error !== null && React.createElement('div', {
+          role: 'alert',
+          style: { fontSize: '12px', color: 'var(--dsw-alias-label-danger, hsl(0 70% 50%))', margin: '0 0 8px' },
+        }, error),
+        React.createElement('div', {
+          role: 'group',
+          'aria-label': t('tags.list.aria'),
+          style: { display: 'flex', flexDirection: 'column', gap: '2px', maxHeight: '240px', overflowY: 'auto', minWidth: '230px' },
+        },
+          snapshot.pool.length === 0 && !snapshot.loaded && React.createElement('div', {
+            style: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)', padding: '6px 2px' },
+          }, t('tags.loading')),
+          snapshot.pool.length === 0 && snapshot.loaded && React.createElement('div', {
+            style: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)', padding: '6px 2px' },
+          }, t('tags.empty')),
+          snapshot.pool.map((name) => React.createElement('label', {
+            key: name,
+            style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 6px', borderRadius: '6px', cursor: pending ? 'default' : 'pointer' },
+          },
+            React.createElement('input', {
+              type: 'checkbox',
+              checked: attached.has(name),
+              disabled: pending,
+              onChange: (event) => { void toggle(name, event.target.checked); },
+            }),
+            React.createElement('span', {
+              'aria-hidden': true,
+              style: { width: '10px', height: '10px', borderRadius: '50%', background: tagColorOf(name), flex: '0 0 auto' },
+            }),
+            React.createElement('span', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-primary)' } }, name))),
+        ),
+        React.createElement('div', {
+          style: { display: 'flex', gap: '6px', marginTop: '10px' },
+        },
+          React.createElement('input', {
+            value: draft,
+            placeholder: t('tags.inputPlaceholder'),
+            'aria-label': t('tags.input.aria'),
+            'data-modal-autofocus': true,
+            disabled: pending,
+            style: { flex: '1', minWidth: '0', fontSize: '12px', padding: '6px 8px', borderRadius: '6px', border: '1px solid var(--dsw-alias-border, transparent)', background: 'transparent', color: 'var(--dsw-alias-label-primary)' },
+            onCompositionStart: () => { composingRef.current = true; },
+            onCompositionEnd: () => { composingRef.current = false; },
+            onChange: (event) => {
+              setDraft(event.target.value);
+              setError(null);
+            },
+            onKeyDown: (event) => {
+              if (event.key === 'Enter' && !composingRef.current) {
+                event.preventDefault();
+                void create();
+              }
+            },
+          }),
+          React.createElement(P.Button, {
+            variant: 'outline',
+            disabled: pending || normalizeTagName(draft) === '',
+            onClick: () => { void create(); },
+            'aria-label': t('tags.add.aria'),
+          }, t('tags.add')),
+        ),
+      );
+    }
+
     return {
-      inject: ['slots', 'locale', 'sessions', 'workspaces', 'uiWorkspace', 'contextMenus', 'remote', 'remoteAccess', 'shortcuts'],
+      inject: ['slots', 'locale', 'sessions', 'workspaces', 'uiWorkspace', 'contextMenus', 'remote', 'remoteAccess', 'shortcuts', 'connection'],
       apply(ctx) {
         React = require('react');
         P = require('@deepseek-ai/dsh-client-ui-primitives');
@@ -2155,6 +2443,8 @@ window.__ModuleLoader__.load({
         const sessions = ctx.get('sessions');
         const workspaces = ctx.get('workspaces');
         const uiWorkspace = ctx.get('uiWorkspace');
+        const connection = ctx.get('connection');
+        const t = ctx.locale.bind(NS);
 
         // 视图状态：与内置同 persist 键（禁用回退时内置无缝接续同一份分组/排序/展开/手动序）。
         const viewHandle = storeLib.defineStore(workspaceViewStoreSpec());
@@ -2187,6 +2477,95 @@ window.__ModuleLoader__.load({
           inject: browserInjected,
           locale: NS,
         }, WorkspaceBrowserShadow));
+
+        // -------------------------------------------------------------------
+        // 标签数据面（票 #4）：/session-tags RPC 通道 + 本地镜像 store。
+        // -------------------------------------------------------------------
+        tagsStore = createMiniStore({ loaded: false, pool: [], bySession: {} });
+        editorRequest = createMiniStore(null);
+
+        /** 连接信封展开：{ ok:true, value } → value；失败/异形一律抛 Error。 */
+        const callTags = async (method, args) => {
+          const result = await connection.rpc.call(TAG_RPC_CHANNEL, method, args);
+          if (result === null || typeof result !== 'object' || result.ok !== true) {
+            const message = result !== null && typeof result === 'object' && result.error?.message
+              ? result.error.message
+              : '标签通道调用失败：' + method;
+            throw new Error(message);
+          }
+          return result.value;
+        };
+        const patchSession = (sessionId, pool, sessionTags) => {
+          const current = tagsStore.getSnapshot();
+          tagsStore.set({ loaded: true, pool: pool ?? current.pool, bySession: { ...current.bySession, [sessionId]: sessionTags } });
+        };
+
+        tagActions = {
+          /** 全量镜像（首屏）：行色点对未打开过弹层的会话也能显示。 */
+          async refreshAll() {
+            const value = await callTags('listAll', {});
+            tagsStore.set({ loaded: true, pool: value.pool, bySession: value.bySession });
+          },
+          async refreshSessionTags(sessionId) {
+            const value = await callTags('listSessionTags', { sessionId });
+            patchSession(sessionId, undefined, value.tags);
+          },
+          async setSessionTags(sessionId, names) {
+            const value = await callTags('setSessionTags', { sessionId, tags: names });
+            patchSession(sessionId, value.pool, value.tags);
+          },
+          async createAndAttach(sessionId, name) {
+            const value = await callTags('createAndAttach', { sessionId, name });
+            patchSession(sessionId, value.pool, value.tags);
+          },
+        };
+
+        // 行首标签色点（shadow 自己声明的 inline 子座位；状态点占用时 T1 渲染层
+        // 不调本座位 → 色点让位，取舍见 SessionTagDots 注释）。
+        ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({
+          name: 'sidebar.session.row.leading',
+          id: 'session-tags.dots',
+          order: 10,
+        }, SessionTagDots));
+
+        // 「编辑标签」菜单项：走 contextMenus.register（内置会话菜单五项的同款
+        // 机制：pin 100 / rename 200 / fork 300 / copy-id 450 / archive 600，
+        // 本项 500 落在 copy-id 与 archive 之间）。票面原文写的是
+        // sidebar.workspaces.session.menu.item 座位，但该座位 occupants 是
+        // primitives.Menu 的自由 children（渲染在 items 之后、不进 Menu 的
+        // 条目模型：无键盘焦点环/选中语义，行样式需自拼编译类）——权衡后改用
+        // 与内置完全同机制的数据项，行为与外观零差异；取舍详见 10 号笔记。
+        ctx.effect(() => ctx.contextMenus.register({
+          id: 'session-tags.edit',
+          target: 'session',
+          order: 500,
+          observe: () => [ctx.locale],
+          resolve: (target) => [{
+            id: 'edit-tags',
+            label: t('menu.editTags'),
+            icon: { key: 'session-tags.tag' },
+            run: () => {
+              editorRequest.set({ sessionId: target.sessionId, displayTitle: target.displayTitle });
+            },
+          }],
+        }), 'session-tags: edit-tags menu item');
+
+        // 菜单图标：contextMenu.icon 是 keyed 座位，key 自带命名空间防撞内置八键。
+        ctx.slots.inject('contextMenu.icon', function* () {
+          yield ctx.slots.register({ name: 'contextMenu.icon', key: 'session-tags.tag' }, TagIcon);
+        });
+
+        // 弹层：shell.overlay 帧级浮层（形态同内置 rename/archive 对话框注册）。
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'session-tags.editor',
+          locale: NS,
+        }, TagEditorOverlay));
+
+        // 首屏全量镜像（异步，失败只降级为「弹层打开时再取」，不阻塞 shadow 渲染）。
+        tagActions.refreshAll().catch((error) => {
+          console.warn('session-tags: initial tag snapshot failed:', error);
+        });
       },
       /**
        * 纯逻辑层测试 seam（spec「Testing Decisions」：只测外部行为；UI 渲染层不自动化测试）。
@@ -2194,6 +2573,7 @@ window.__ModuleLoader__.load({
        */
       logic: {
         SLOT_NAME,
+        TAG_RPC_CHANNEL,
         SHADOW_PRIORITY,
         VIEW_PERSIST_KEY,
         FLAT_SESSION_ORDER_KEY,
@@ -2230,6 +2610,12 @@ window.__ModuleLoader__.load({
         viewOptionsMenuModel,
         workspaceViewStoreSpec,
         displayTitle,
+        TAG_PALETTE,
+        tagColorOf,
+        visibleTagDots,
+        tagDotSize,
+        tagDotTitle,
+        normalizeTagName,
       },
     };
   },

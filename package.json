@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "会话标签：给会话打标签并按标签分组浏览（T1 shadow 浏览区基线）",
+  "description": "会话标签：给会话打标签并按标签分组浏览（T3 数据层与打标入口）",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -12,6 +12,8 @@
   },
   "files": [
     "index.js",
+    "tag-store.js",
+    "tag-rpc.js",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",

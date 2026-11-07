@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { handleTagRpc } from '../tag-rpc.js';
+import { handleTagRpc, serveTagRpc } from '../tag-rpc.js';
 import { createTagService } from '../tag-store.js';
 
 function makeMemoryDomain(initial) {
@@ -25,6 +25,66 @@ function makeMemoryDomain(initial) {
 async function makeService() {
   return createTagService({ domain: makeMemoryDomain(), sessionExists: async () => true });
 }
+
+/** 造一个连接层等价的 dispatch（HTTP 桥的注入 seam）。 */
+async function makeDispatch() {
+  const service = await makeService();
+  return (method, args) => handleTagRpc(service, method, args);
+}
+
+const envelope = (rpcId, result) => JSON.stringify({ type: 'server-response', rpcId, result });
+
+describe('serveTagRpc：HTTP 桥（连接信封语义，镜像 conn-index rpcFetchHandler）', () => {
+  it('合法信封 POST → 200 + server-response 成功信封', async () => {
+    const dispatch = await makeDispatch();
+    const outcome = await serveTagRpc(dispatch, 'listPool', JSON.stringify({ type: 'client-request', rpcId: 'r-1', method: 'listPool', payload: {} }));
+    expect(outcome.status).toBe(200);
+    expect(outcome.contentType).toBe('application/json');
+    expect(JSON.parse(outcome.body)).toEqual({ type: 'server-response', rpcId: 'r-1', result: { ok: true, value: { pool: [] } } });
+  });
+
+  it('业务失败也回 200 信封（ok:false + error），不靠 HTTP 状态码传业务错', async () => {
+    const dispatch = await makeDispatch();
+    const outcome = await serveTagRpc(dispatch, 'setSessionTags', JSON.stringify({ type: 'client-request', rpcId: 'r-2', method: 'setSessionTags', payload: { sessionId: 's1', tags: 'oops' } }));
+    expect(outcome.status).toBe(200);
+    const body = JSON.parse(outcome.body);
+    expect(body.result.ok).toBe(false);
+    expect(body.result.error.code).toBe('session-tags/invalid-args');
+  });
+
+  it('method 与端点不符 → gateway/bad-request 信封', async () => {
+    const dispatch = await makeDispatch();
+    const outcome = await serveTagRpc(dispatch, 'listPool', JSON.stringify({ type: 'client-request', rpcId: 'r-3', method: 'listAll', payload: {} }));
+    expect(outcome.status).toBe(200);
+    const body = JSON.parse(outcome.body);
+    expect(body.rpcId).toBe('r-3');
+    expect(body.result.error.code).toBe('gateway/bad-request');
+  });
+
+  it('信封形状不对 → rpcId=invalid-request 的 gateway/bad-request 信封', async () => {
+    const dispatch = await makeDispatch();
+    const outcome = await serveTagRpc(dispatch, 'listPool', JSON.stringify({ hello: 1 }));
+    const body = JSON.parse(outcome.body);
+    expect(body.rpcId).toBe('invalid-request');
+    expect(body.result.error.code).toBe('gateway/bad-request');
+  });
+
+  it('body 不是 JSON → 400 纯文本', async () => {
+    const dispatch = await makeDispatch();
+    const outcome = await serveTagRpc(dispatch, 'listPool', '{oops');
+    expect(outcome.status).toBe(400);
+    expect(outcome.body).toBe('body is not JSON');
+  });
+
+  it('端点形状非法（含斜杠等）→ 404，不进 dispatch', async () => {
+    const dispatch = await makeDispatch();
+    let called = 0;
+    const spy = async (method, args) => { called += 1; return { ok: true, value: {} }; };
+    const outcome = await serveTagRpc(spy, undefined, JSON.stringify({ type: 'client-request', rpcId: 'r-4', method: 'listPool', payload: {} }));
+    expect(outcome.status).toBe(404);
+    expect(called).toBe(0);
+  });
+});
 
 describe('handleTagRpc：方法分派', () => {
   it('setSessionTags → createAndAttach → listSessionTags → listPool 全链可用', async () => {

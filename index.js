@@ -5,16 +5,20 @@
  * 服务逻辑），数据独立于 UI 存活——插件禁用即整 fiber 退出，盘上数据不受影响
  * （ADR-0001「UI 损坏不丢数据」；重装/重启后原样接续）。
  *
- * 通道面（Client→Host JSON RPC）：`ctx.connection.rpc.handle('/session-tags', …)`
- * ——静态 bundle 的 host.call 语义落点。连接信封 { ok, value|error } 由
- * handleTagRpc 统一装配（tag-rpc.js，契约有单测锁定）。
+ * 通道面（Client→Host JSON RPC）：自己的 `/session-tags` prefix 路由（webServer
+ * register + connection.admit 认证栅栏），信封 { ok, value|error } 由
+ * handleTagRpc 装配、HTTP 层语义由 serveTagRpc 承载（均见 tag-rpc.js，契约有单测）。
  *
  * 关于 host.call 全局符号：lead 简报把它列在「Client builtins」下，但那是动态包
  * guard 门面的闭包参数（runner lib/client.js:310-337，Builtin Inspect 的口径）；
  * 静态 bundle 的工厂只拿 require（dsh-client-modules lib/client.js:819），页面
- * 全局也没有 host 符号（web shell dist 全文检索实证）。故按 01 笔记 §2 的静态
- * 通道落点：connection RPC 通道（Host 半注册语法 = rpc.handle(channel, handler)，
- * conn-index.js:723-730）。详见笔记 10-t3-impl-notes.md。
+ * 全局也没有 host 符号（web shell dist 全文检索实证）。静态通道的三个候选里——
+ * `ctx.connection.rpc.handle`（内部把路由挂在 connection 自身 ctx 并取
+ * owner.webServer，而 connection 行没 inject webServer，外部插件调用必抛错，
+ * 已实测）、`connection.fetch.register`（/api 共享通道的 exact 路由，但端点只能
+ * 单段且污染 /api 命名空间，client rpc.call 的端点模式也进不去）——最终按
+ * 01 笔记 §2 的本机路由通道落点：webServer.register prefix + admit 守门。
+ * 详见笔记 10-t3-impl-notes.md。
  *
  * 清理面：删除会话双保险——
  * - 事件清理：`api-session/removed`（session/disposed 的转发，sc-index.js:3828-3830）
@@ -25,10 +29,16 @@
  */
 
 import { createTagService, TAG_DOMAIN_SPEC } from './tag-store.js';
-import { handleTagRpc } from './tag-rpc.js';
+import { handleTagRpc, serveTagRpc, tagRpcEndpointFromPath } from './tag-rpc.js';
 
 /** Client→Host 标签通道（CHANNEL_PATTERN ^\/[A-Za-z0-9._~-]+$ 合法）。 */
 export const TAG_RPC_CHANNEL = '/session-tags';
+
+/** 请求体上限：标签方法面的 payload 极小，1MB 已是天文数字。 */
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+
+/** Host 半依赖的服务（apply 内经 ctx.storageDomain / ctx.connection 访问）。 */
+export const inject = ['storageDomain', 'connection'];
 
 /**
  * 组装真实环境的会话存在性谓词。三层来源，前两层（workspace 槽位/归档集）
@@ -70,18 +80,53 @@ export async function apply(ctx) {
 
   const service = createTagService({ domain, sessionExists: hostSessionExists(ctx) });
 
-  // RPC 通道。注册效果挂在 connection 自身的 ctx 上（服务内部语义），这里再挂
-  // 一个自己的 effect 以在插件卸载时显式 dispose，避免禁用→再启用时的通道重注册。
-  ctx.effect(() => {
-    const registration = ctx.connection.rpc.handle(TAG_RPC_CHANNEL, (method, args) => handleTagRpc(service, method, args));
-    return () => {
-      try {
-        registration.dispose();
-      } catch {
-        // connection 先行拆除时这里已无需清理。
-      }
-    };
-  }, 'session-tags: rpc channel');
+  // RPC 路由：挂在自己的 `/session-tags` prefix 路由上，信封语义照抄连接层
+  // rpcFetchHandler（serveTagRpc 纯核，有单测）。
+  // 不用 `ctx.connection.rpc.handle`：它把路由登记在 connection 服务自身的 ctx
+  // 上并以 owner.webServer.register 落地，而 connection 行没有 inject webServer
+  // （其 /api 路由靠自己的 ctx.inject(['webServer']) 子作用域）——外部插件调用
+  // 必抛 "cannot get property webServer without inject"（已实测）。认证栅栏用
+  // connection.admit（同一 Host/Origin 围栏 + 浏览器 peer 判定）。
+  ctx.inject(['webServer'], (webCtx) => {
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'prefix',
+      path: TAG_RPC_CHANNEL,
+      handler: async (req, res) => {
+        const admission = ctx.connection.admit(req);
+        if ('rejection' in admission) {
+          res.writeHead(admission.rejection);
+          res.end(admission.rejection === 401 ? 'unauthorized' : 'forbidden');
+          return;
+        }
+        if (req.method !== 'POST') {
+          res.writeHead(404);
+          res.end('not found');
+          return;
+        }
+        const endpoint = tagRpcEndpointFromPath(TAG_RPC_CHANNEL, String(req.url ?? ''));
+        const chunks = [];
+        let size = 0;
+        let tooLarge = false;
+        for await (const chunk of req) {
+          size += chunk.length;
+          if (size > MAX_REQUEST_BODY_BYTES) { tooLarge = true; break; }
+          chunks.push(chunk);
+        }
+        if (tooLarge) {
+          res.writeHead(413);
+          res.end('request body too large');
+          return;
+        }
+        const outcome = await serveTagRpc(
+          (method, args) => handleTagRpc(service, method, args),
+          endpoint,
+          Buffer.concat(chunks).toString('utf8'),
+        );
+        res.writeHead(outcome.status, { 'content-type': outcome.contentType });
+        res.end(outcome.body);
+      },
+    }), 'session-tags: rpc route');
+  });
 
   // 删除会话事件清理（误报由谓词守门；失败静默——惰性路径会兜住）。
   ctx.effect(

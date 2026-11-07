@@ -76,3 +76,75 @@ export async function handleTagRpc(service, method, args) {
     return fail('internal', error instanceof Error ? error.message : String(error));
   }
 }
+
+// ---------------------------------------------------------------------------
+// HTTP 桥纯核（serveTagRpc）：Host 半在自己的 `/session-tags` prefix 路由上
+// 承载与连接层 rpcFetchHandler 相同的信封语义（conn-index.js:888-917）。
+// 之所以不用 `ctx.connection.rpc.handle`：它把路由登记在 connection 服务自身的
+// ctx 上并以 `owner.webServer.register` 落地，而 connection 行没有 inject
+// webServer（其 /api 路由走的是自己的 ctx.inject(['webServer']) 子作用域）——
+// 从外部插件调用必然抛 "cannot get property webServer without inject"。
+// ---------------------------------------------------------------------------
+
+const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/;
+
+/** 从 URL pathname 提取端点名（语义同 conn-index endpointFromPath）。 */
+export function tagRpcEndpointFromPath(channel, pathname) {
+  if (typeof pathname !== 'string' || !pathname.startsWith(`${channel}/`)) return undefined;
+  const endpoint = pathname.slice(channel.length + 1);
+  if (endpoint.split('/').some((segment) => segment === '' || segment === '.' || segment === '..' || !ENDPOINT_SEGMENT_PATTERN.test(segment))) return undefined;
+  return endpoint;
+}
+
+/**
+ * 处理一次 HTTP 层的标签 RPC 请求（I/O 已剥离：进 rawBody 字符串，出状态行）。
+ * @param {(method: string, args: unknown) => Promise<object>} dispatch - 通常为
+ *   `(method, args) => handleTagRpc(service, method, args)`。
+ * @param {string | undefined} endpoint - URL 提取的端点名；undefined/非法 → 404。
+ * @param {string} rawBody - 原始请求体。
+ * @returns {Promise<{status: number, contentType: string, body: string}>}
+ */
+export async function serveTagRpc(dispatch, endpoint, rawBody) {
+  if (endpoint === undefined || !ENDPOINT_SEGMENT_PATTERN.test(endpoint)) {
+    return { status: 404, contentType: 'text/plain; charset=utf-8', body: 'not found' };
+  }
+  let message;
+  try {
+    message = JSON.parse(rawBody);
+  } catch {
+    return { status: 400, contentType: 'text/plain; charset=utf-8', body: 'body is not JSON' };
+  }
+  const valid = message !== null && typeof message === 'object'
+    && message.type === 'client-request'
+    && typeof message.rpcId === 'string'
+    && typeof message.method === 'string';
+  if (!valid) {
+    const rawId = message !== null && typeof message === 'object' && typeof message.rpcId === 'string' ? message.rpcId : 'invalid-request';
+    return {
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        type: 'server-response',
+        rpcId: rawId,
+        result: { ok: false, error: { code: 'gateway/bad-request', message: 'invalid client-request message', details: {} } },
+      }),
+    };
+  }
+  if (message.method !== endpoint) {
+    return {
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        type: 'server-response',
+        rpcId: message.rpcId,
+        result: { ok: false, error: { code: 'gateway/bad-request', message: `method ${JSON.stringify(message.method)} does not match endpoint ${JSON.stringify(endpoint)}`, details: {} } },
+      }),
+    };
+  }
+  const result = await dispatch(message.method, message.payload);
+  return {
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ type: 'server-response', rpcId: message.rpcId, result }),
+  };
+}

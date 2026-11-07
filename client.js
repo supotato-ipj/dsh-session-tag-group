@@ -504,6 +504,40 @@ window.__ModuleLoader__.load({
       return title === DEFAULT_WORKSPACE_DIRECTORY ? localizedDefault : title;
     }
 
+    /**
+     * 同名 workspace 的消歧路径尾段（uiw client.js:2697-2712）：标题唯一者无条目；
+     * 同名者各取「最短的、无其他同名行与之相同的尾段」（slice(-(2n-1)) 个分段元素，
+     * 分隔符随 split 保留在段里）。
+     */
+    function distinguishingPathSuffixes(workspaces) {
+      const rows = workspaces.map((workspace) => ({
+        ...workspace,
+        parts: workspace.path.split(/([\\/])/),
+      }));
+      const suffix = (parts, count) => parts.slice(-(2 * count - 1)).join('');
+      const suffixes = new Map();
+      for (const row of rows) {
+        const peers = rows.filter((other) => other !== row && other.title === row.title);
+        if (peers.length === 0) continue;
+        let count = 1;
+        while (2 * count - 1 < row.parts.length && (suffix(row.parts, count) === '' || peers.some((peer) => suffix(peer.parts, count) === suffix(row.parts, count)))) count++;
+        suffixes.set(row.id, suffix(row.parts, count));
+      }
+      return suffixes;
+    }
+
+    /**
+     * workspace 重命名对话框的校验规则（uiw client.js:1805-1807）：trim 非空、
+     * 不与存储标题相同、不与其他 workspace 标题重名（重名比较用传入列表的
+     * title 字段，排除自身；提交进行中一律 blocked）。
+     */
+    function workspaceRenameReview(draft, request, workspaces, renaming) {
+      const trimmed = draft.trim();
+      const duplicate = request !== null && trimmed !== '' && workspaces.some((workspace) => workspace.workspaceId !== request.workspaceId && workspace.title === trimmed);
+      const blocked = renaming || trimmed === '' || request === null || trimmed === request.storedTitle || duplicate;
+      return { trimmed, duplicate, blocked };
+    }
+
     /** Show the blank row plus the first `watermark` non-blank rows（uiw client.js:2953-2964）。 */
     function watermarkRows(sessions, watermark) {
       let count = 0;
@@ -2204,6 +2238,8 @@ window.__ModuleLoader__.load({
         mainSessionId,
         workspaceLabel,
         workspaceDisplayTitle,
+        distinguishingPathSuffixes,
+        workspaceRenameReview,
         orderByRecency,
         reconcileManualOrder,
         pinCurrentBlank,

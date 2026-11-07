@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import { createClientModule } from './helpers/client-artifact.js';
+import { createClientModule, ts } from './helpers/client-artifact.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const clientPath = path.join(here, '..', 'client.js');
@@ -104,5 +104,53 @@ describe('workspaceRenameReview（重命名对话框校验规则）', () => {
     const mapped = [...workspaces, { workspaceId: 'w3', title: '默认工作区' }];
     const review = logic.workspaceRenameReview('默认工作区', request, mapped, false);
     expect(review.duplicate).toBe(true);
+  });
+});
+
+describe('hoverTimeLabel（悬停卡相对时间，uiw 2123-2126）', () => {
+  const t = (key, params) => key + (params ? JSON.stringify(params) : '');
+
+  it('now 桶保持裸词（不套 ago 模板）', () => {
+    const relative = () => ({ unit: 'now', n: 0 });
+    expect(logic.hoverTimeLabel(relative, ts(1), ts(1), t)).toBe('time.now');
+  });
+
+  it('距离值套 time.ago 模板，内层走 time.{unit}', () => {
+    const relative = () => ({ unit: 'hours', n: 5 });
+    expect(logic.hoverTimeLabel(relative, ts(1), ts(1), t)).toBe('time.ago' + JSON.stringify({ t: 'time.hours' + JSON.stringify({ n: 5 }) }));
+  });
+});
+
+describe('createdLabel（悬停卡绝对创建时间，uiw 2132-2140）', () => {
+  const t = (key, params) => key + (params ? JSON.stringify(params) : '');
+
+  it('date.ymd 模板 + 两位补零的本地时分', () => {
+    // 用本地时间构造：createdLabel 内部走本地 getFullYear/getMonth/getHours，构造与断言同基即与机器时区无关。
+    const created = new Date(2026, 2, 5, 7, 8);
+    const label = logic.createdLabel(created.getTime(), t);
+    // t 桩对内层 date.ymd 调用同样生效：外层 time 值 = date.ymd{y,m,d} + ' 07:08'。
+    expect(label).toBe('hover.created' + JSON.stringify({ time: 'date.ymd' + JSON.stringify({ y: 2026, m: 3, d: 5 }) + ' 07:08' }));
+  });
+
+  it('分钟两位补零（9:05 → 09:05）', () => {
+    const created = new Date(2026, 11, 31, 9, 5);
+    expect(logic.createdLabel(created.getTime(), t)).toContain('09:05');
+  });
+});
+
+describe('hoverStatuses（悬停卡状态行，uiw 2401-2402）', () => {
+  const t = (key, params) => key + (params ? JSON.stringify(params) : '');
+  const base = { runningSubagentCount: 0 };
+
+  it('未归档行与行内状态一致（全状态保留）', () => {
+    const statuses = logic.hoverStatuses({ ...base, running: true, completed: true }, t);
+    expect(statuses.map((s) => s.state)).toEqual(['ongoing']);
+  });
+
+  it('归档行剔除 done/idle 状态（归档行只剩活动态或无状态行）', () => {
+    expect(logic.hoverStatuses({ ...base, completed: true, archived: true }, t)).toEqual([]);
+    expect(logic.hoverStatuses({ ...base, archived: true }, t)).toEqual([]);
+    const running = logic.hoverStatuses({ ...base, running: true, archived: true }, t);
+    expect(running.map((s) => s.state)).toEqual(['ongoing']);
   });
 });

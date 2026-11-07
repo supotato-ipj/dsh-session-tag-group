@@ -538,6 +538,37 @@ window.__ModuleLoader__.load({
       return { trimmed, duplicate, blocked };
     }
 
+    /**
+     * 悬停卡时间变体：距离值套 ago 模板、now 桶保持裸词（uiw client.js:2123-2126）。
+     * relative 由组件注入（P.relativeTime），纯逻辑层不依赖 primitives。
+     */
+    function hoverTimeLabel(relative, updatedAt, now, t) {
+      const { unit, n } = relative(updatedAt, now);
+      return unit === 'now' ? t('time.now') : t('time.ago', { t: t('time.' + unit, { n }) });
+    }
+
+    /**
+     * 悬停卡绝对创建时间：走词表 date.ymd 模板 + 两位补零本地时分
+     * （uiw client.js:2132-2140；不用 toLocaleString——那会跟浏览器语言混排）。
+     */
+    function createdLabel(createdAt, t) {
+      const date = new Date(createdAt);
+      const pad2 = (value) => String(value).padStart(2, '0');
+      return t('hover.created', { time: `${t('date.ymd', {
+        y: date.getFullYear(),
+        m: date.getMonth() + 1,
+        d: date.getDate(),
+      })} ${pad2(date.getHours())}:${pad2(date.getMinutes())}` });
+    }
+
+    /**
+     * 悬停卡状态行（uiw client.js:2401-2402）：归档行剔除 done/idle 状态，
+     * 活动态（warning/ongoing）保留。
+     */
+    function hoverStatuses(node, t) {
+      return sessionStatuses(node, t).filter((status) => !(node.archived && (status.state === 'done' || status.state === 'idle')));
+    }
+
     /** Show the blank row plus the first `watermark` non-blank rows（uiw client.js:2953-2964）。 */
     function watermarkRows(sessions, watermark) {
       let count = 0;
@@ -2240,6 +2271,9 @@ window.__ModuleLoader__.load({
         workspaceDisplayTitle,
         distinguishingPathSuffixes,
         workspaceRenameReview,
+        hoverTimeLabel,
+        createdLabel,
+        hoverStatuses,
         orderByRecency,
         reconcileManualOrder,
         pinCurrentBlank,

@@ -21,10 +21,10 @@ const iconFor = () => null;
 describe('viewOptionsMenuModel（ViewOptionsMenu 结构复刻）', () => {
   const model = logic.viewOptionsMenuModel(t, iconFor);
 
-  it('分组组别：label「分组方式」+ workspace/workspace-tree/flat 三项', () => {
+  it('分组组别：label「分组方式」+ workspace/workspace-tree/flat/tag 四项', () => {
     expect(model.items[0]).toEqual({ type: 'label', id: 'group-by', text: 'groupBy.label' });
     const groupIds = model.items.filter((item) => item.id && logic.viewOptionSelection(item.id)?.kind === 'group').map((item) => item.id);
-    expect(groupIds).toEqual(['workspace', 'workspace-tree', 'flat']);
+    expect(groupIds).toEqual(['workspace', 'workspace-tree', 'flat', 'tag']);
     expect(model.items.find((item) => item.id === 'workspace').label).toBe('groupBy.workspace');
   });
 
@@ -53,6 +53,7 @@ describe('viewOptionsMenuModel（ViewOptionsMenu 结构复刻）', () => {
     expect(model.selectedIds('workspace', 'updated', 'default')).toEqual(['workspace', 'updated', 'hide-archived']);
     expect(model.selectedIds('flat', 'manual', 'only')).toEqual(['flat', 'manual', 'only-archived']);
     expect(model.selectedIds('workspace-tree', 'updated', 'show')).toEqual(['workspace-tree', 'updated', 'show-archived']);
+    expect(model.selectedIds('tag', 'updated', 'default')).toEqual(['tag', 'updated', 'hide-archived']);
   });
 
   it('dispatch：分派到分组/排序/归档三通道', () => {
@@ -64,11 +65,13 @@ describe('viewOptionsMenuModel（ViewOptionsMenu 结构复刻）', () => {
     expect(logic.viewOptionSelection('unknown')).toBeNull();
   });
 
-  it('T4 预留位：GROUP_ITEMS 里尚无 tag 项，但 flat 之后留有插入位（order-by separator 之前）', () => {
-    expect(logic.viewOptionSelection('tag')).toBeNull();
+  it('T4：「按标签」项在 flat 之后、order-by separator 之前（分组组别内与内置三项并列，不跨组）', () => {
+    expect(logic.viewOptionSelection('tag')).toEqual({ kind: 'group', value: 'tag' });
     const ids = model.items.map((item) => item.id);
-    expect(ids).not.toContain('tag');
-    expect(ids.indexOf('flat')).toBe(ids.indexOf('order-by-separator') - 1);
+    expect(ids).toContain('tag');
+    expect(ids.indexOf('tag')).toBe(ids.indexOf('flat') + 1);
+    expect(ids.indexOf('tag')).toBe(ids.indexOf('order-by-separator') - 1);
+    expect(model.items.find((item) => item.id === 'tag').label).toBe('groupBy.tag');
   });
 });
 

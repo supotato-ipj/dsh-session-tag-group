@@ -19,7 +19,15 @@
  * 重命名/删除对话框、添加工作区按钮、会话/workspace 悬停卡。归档/置顶/会话重命名/
  * 归档确认框/行 toast 由内置的独立 slot 注册继续供给（见「子座位保活」），本插件通过
  * 共享 store 探测（快捷键/重命名请求/工作区动作请求/toast 通道）与共享 view store
- * 句柄（归档 toast 的筛选动作、pin 本地序）与内置保持一致。**不做**（T3/T4）：标签任何内容。
+ * 句柄（归档 toast 的筛选动作、pin 本地序）与内置保持一致。T3（票 #4）增量——
+ * 标签数据面（/session-tags RPC + 本地镜像）、行首色点、「编辑标签」弹层与菜单项。
+ * T4（票 #5）增量——标签模式聚合视图：分组计算纯函数（deriveTagGroups/
+ * tagSearchMatchIds）、ViewOptionsMenu「按标签」项（GROUP_ITEMS 四项）、
+ * TagGroupsView 渲染器（置顶段→标签组→未标签段、组头色点、行级 workspace
+ * 标注、搜索在分组结果内过滤、水位线）、模式选择 Host 域持久化
+ * （session_tags v2 的 mode 字段 + getViewMode/setViewMode；内置模式仍写
+ * 共享 view store 键 dsh.workspace.view.v5）。内置默认三模式行为不变，标签
+ * 模式只增量。
  *
  * 子座位保活（07 简报 §1）：本注册原样声明内置的五个 children（directoryFlow / session.row.action /
  * session.row.leading / session.row.trailing / session.row.hover），并以相同 props renderSlot——
@@ -780,13 +788,14 @@ window.__ModuleLoader__.load({
 
     /**
      * ViewOptionsMenu 的纯模型（uiw client.js:3029-3108 抽取）：items 结构、selectedIds 映射、
-     * onSelect 分派。**T4 预留位**：在 GROUP_ITEMS 的 flat 项之后插「按标签」项（本票不加）。
+     * onSelect 分派。T4：GROUP_ITEMS 扩为 workspace/tree/flat/tag 四项，「按标签」
+     * 与内置三项并列（不跨组：仍在 order-by separator 之前）。
      */
     const GROUP_ITEMS = [
       { id: 'workspace', labelKey: 'groupBy.workspace' },
       { id: 'workspace-tree', labelKey: 'groupBy.workspaceTree' },
       { id: 'flat', labelKey: 'groupBy.flat' },
-      // T4（#5）：{ id: 'tag', labelKey: 'groupBy.tag' } 插在这里（分组 label 之后、排序 separator 之前）。
+      { id: 'tag', labelKey: 'groupBy.tag' },
     ];
     const ORDER_ITEMS = [
       { id: 'manual', labelKey: 'orderBy.manual' },
@@ -944,6 +953,168 @@ window.__ModuleLoader__.load({
     function normalizeTagName(raw) {
       if (typeof raw !== 'string') return '';
       return raw.replace(/\s+/g, ' ').trim();
+    }
+
+    // =====================================================================
+    // 标签模式分组计算（票 #5 / T4，spec「Implementation Decisions」）：
+    // 输入 =（会话快照 + workspaces + rowState + statuses 四元组，对齐内置
+    // deriveGroups 形态）+ 标签映射（listAll 镜像）+ 视图参数；输出 = 有序
+    // 分组树：置顶段 → 标签组（组间按组内最近活跃）→ 未标签段（垫底）。
+    // 归档排除只在这一层做视图排除（sessionVisible），关联数据不动（T3 契约：
+    // bySession 槽位保留，取消归档原样回组）；shadow UI 只是本函数的渲染器。
+    // =====================================================================
+
+    /** 置顶聚合段 / 未标签段 / 标签组的分组键（'@' 前缀避开 workspaceId 键空间）。 */
+    const TAG_PINNED_KEY = '@pinned';
+    const TAG_UNTAGGED_KEY = '@untagged';
+    const TAG_GROUP_KEY_PREFIX = '@tag:';
+
+    /**
+     * 会话标签名对照池子做大小写规整：池内首见写法为准（bySession 与池在正常写
+     * 路径下同拍，此处只兜手改 JSON 的大小写漂移）；池外未知名原样保留。
+     */
+    function canonicalTagNames(names, pool) {
+      const canonical = new Map();
+      for (const name of Array.isArray(pool) ? pool : []) canonical.set(String(name).toLowerCase(), name);
+      return (Array.isArray(names) ? names : []).map((name) => canonical.get(String(name).toLowerCase()) ?? name);
+    }
+
+    /**
+     * 行级 workspace 标注：归属 workspace（sessionIds 权威）的显示名 →
+     * 游离会话回退 cwd 尾段 → 都没有为空串（deriveSearchResults 的 labelOf 同形）。
+     */
+    function workspaceLabelOf(summary, workspaces) {
+      const owner = (Array.isArray(workspaces) ? workspaces : [])
+        .find((workspace) => Array.isArray(workspace?.sessionIds) && workspace.sessionIds.includes(summary.id));
+      return owner !== undefined ? owner.title : workspaceLabel(summary.cwd);
+    }
+
+    /**
+     * 标签模式分组树。view 参数：`isExpanded(key)`（缺省全展开，折叠组只给
+     * sessionCount 不给节点）；`matchIds`（搜索过滤集，缺省不过滤——搜索在
+     * 分组结果内过滤的实现通道，见 tagSearchMatchIds）。
+     */
+    function deriveTagGroups(list, workspaces, rowState, statuses, tags, view = {}) {
+      const archived = new Set(rowState.archivedSessionIds);
+      const pinned = new Set(rowState.pinnedSessionIds);
+      const current = mainSessionId(list);
+      const archivedFilter = rowState.archivedFilter;
+      const matchIds = view.matchIds;
+      const bySession = tags !== null && typeof tags === 'object' ? tags.bySession : undefined;
+      const pool = tags !== null && typeof tags === 'object' ? tags.pool : undefined;
+
+      // 1. 可见集：subagent/blank/归档三态沿用内置 sessionVisible，再叠搜索过滤集。
+      const visible = [];
+      const visibleIds = new Set();
+      for (const id of list.ids) {
+        const summary = list.byId[id];
+        if (summary === undefined) continue;
+        if (matchIds !== undefined && matchIds !== null && !matchIds.has(id)) continue;
+        if (!sessionVisible(summary, current, archived, archivedFilter)) continue;
+        visible.push(summary);
+        visibleIds.add(id);
+      }
+
+      // 2. 置顶段：pinnedSessionIds 顺序（reconcileManualOrder 置顶语义），
+      //    只收可见且非归档的置顶（pin 不覆盖归档）；置顶会话不回标签组重复出现。
+      const pinnedIds = (Array.isArray(rowState.pinnedSessionIds) ? rowState.pinnedSessionIds : [])
+        .filter((id) => visibleIds.has(id) && !archived.has(id));
+      const pinnedSection = new Set(pinnedIds);
+
+      // 3. 标签/未标签分桶：多标签会话进每个所属桶（重复出现是 spec 第 10 条）。
+      const tagBuckets = new Map();
+      const untagged = [];
+      for (const summary of visible) {
+        if (pinnedSection.has(summary.id)) continue;
+        const names = canonicalTagNames(bySession?.[summary.id], pool);
+        if (names.length === 0) untagged.push(summary);
+        else for (const name of names) {
+          const bucket = tagBuckets.get(name);
+          if (bucket === undefined) tagBuckets.set(name, [summary]);
+          else bucket.push(summary);
+        }
+      }
+
+      // 4. 组内序：orderByRecency（updatedAt 降序 + id 升序 tie-break）；
+      //    组间序：组内最近活跃（= 组内 recency 首位的 updatedAt）降序，同分按标签名升序。
+      const tagGroupsData = [...tagBuckets.entries()].map(([name, members]) => ({
+        name,
+        memberIds: orderByRecency(members.map((summary) => summary.id), list.byId),
+      }));
+      tagGroupsData.sort((a, b) => {
+        const rankA = list.byId[a.memberIds[0]]?.updatedAt ?? 0;
+        const rankB = list.byId[b.memberIds[0]]?.updatedAt ?? 0;
+        if (rankA !== rankB) return rankB - rankA;
+        return a.name < b.name ? -1 : 1;
+      });
+
+      // 5. 产出分组树：置顶段 → 标签组 → 未标签段；空段不产出；组内走
+      //    sectionMembers（blank 占位恒组首），节点带行级 workspace 标注。
+      const expandedOf = typeof view.isExpanded === 'function' ? view.isExpanded : () => true;
+      const groups = [];
+      const pushGroup = (key, kind, tagName, memberIds) => {
+        const ordered = sectionMembers(
+          memberIds.map((id) => list.byId[id]).filter((summary) => summary !== undefined),
+          pinned,
+          archived,
+        );
+        const expanded = expandedOf(key) !== false;
+        const group = {
+          key,
+          kind,
+          tagName,
+          color: tagName !== undefined ? tagColorOf(tagName) : undefined,
+          label: tagName ?? '',
+          workspaceId: undefined,
+          cwd: undefined,
+          createdAt: undefined,
+          sessionCount: ordered.length,
+          expanded,
+          containsCurrent: memberIds.includes(current),
+          memberIds: ordered.map((summary) => summary.id),
+        };
+        group.sessions = expanded
+          ? ordered.map((summary) => ({
+              ...sessionNode(summary, list, statuses, pinned, archived),
+              workspace: workspaceLabelOf(summary, workspaces),
+            }))
+          : [];
+        groups.push(group);
+      };
+      if (pinnedIds.length > 0) pushGroup(TAG_PINNED_KEY, 'pinned', undefined, pinnedIds);
+      for (const { name, memberIds } of tagGroupsData) pushGroup(TAG_GROUP_KEY_PREFIX + name, 'tag', name, memberIds);
+      if (untagged.length > 0) {
+        pushGroup(TAG_UNTAGGED_KEY, 'untagged', undefined, orderByRecency(untagged.map((summary) => summary.id), list.byId));
+      }
+      return groups;
+    }
+
+    /**
+     * 标签模式搜索的过滤集：本地匹配（标题 / 行级 workspace 名 / 会话 id /
+     * 标签名，大小写不敏感子串；blank 排除，对齐内置搜索）+ sessions.search
+     * 内容命中并入（可见性由 deriveTagGroups 的 sessionVisible 统一把关）。
+     * 查询为空返回 null（不过滤）。
+     */
+    function tagSearchMatchIds(list, workspaces, tags, query, content) {
+      const q = String(query ?? '').trim().toLowerCase();
+      if (q === '') return null;
+      const bySession = tags !== null && typeof tags === 'object' ? tags.bySession : undefined;
+      const matches = new Set();
+      for (const id of list.ids) {
+        const summary = list.byId[id];
+        if (summary === undefined || summary.blank) continue;
+        const haystack = [
+          sessionTitle(summary),
+          workspaceLabelOf(summary, workspaces),
+          id,
+          ...canonicalTagNames(bySession?.[id], tags !== null && typeof tags === 'object' ? tags.pool : undefined),
+        ].join('\n').toLowerCase();
+        if (haystack.includes(q)) matches.add(id);
+      }
+      for (const item of Array.isArray(content?.items) ? content.items : []) {
+        if (typeof item?.sessionId === 'string') matches.add(item.sessionId);
+      }
+      return matches;
     }
 
     // =====================================================================
@@ -1119,6 +1290,7 @@ window.__ModuleLoader__.load({
           case 'workspace': return React.createElement(P.IconFolderCloseRegular, null);
           case 'workspace-tree': return React.createElement(P.IconWorkspaceTreeOutlineRegular, null);
           case 'flat': return React.createElement(P.IconFlatListOutlineRegular, null);
+          case 'tag': return React.createElement(TagIcon, null);
           case 'manual': return React.createElement(P.IconChevronsUpDownOutlineRegular, null);
           case 'updated': return React.createElement(P.IconClockOutlineRegular, null);
           case 'hide-archived': return React.createElement(P.IconArchiveOffOutlineRegular, null);
@@ -1274,7 +1446,7 @@ window.__ModuleLoader__.load({
      * T1 差异：不包 HoverCard（悬停卡 = T2）；行首/行尾装饰位与「...」菜单、快捷动作列表
      * （renderSlot('sidebar.workspaces.session.row.action')）原样保留。
      */
-    function SessionNodeItem({ node, currentId, now, onOpen, onRenameRequest, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, onReveal, drag, home, useSessionAccess, t }) {
+    function SessionNodeItem({ node, currentId, now, onOpen, onRenameRequest, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, onReveal, drag, home, useSessionAccess, sourceLabel, t }) {
       const { getTriggerProps } = useContextMenu();
       const row = node;
       const title = displayTitle(node, t);
@@ -1363,6 +1535,12 @@ window.__ModuleLoader__.load({
           },
         }, title),
         !row.blank && React.createElement('span', { className: RW.rowResting },
+          // T4：标签模式的行级 workspace 标注（spec 第 15 条）——resting 区、时间位之前；
+          // 仅标签模式传入 sourceLabel，内置三模式不传即原样。
+          sourceLabel !== undefined && sourceLabel !== '' && React.createElement('span', {
+            style: { flex: '0 0 auto', maxWidth: '40%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '11px', lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)', marginRight: '6px' },
+            title: sourceLabel,
+          }, sourceLabel),
           React.createElement('span', {
             className: clsx(RW.time, primaryStatus.trailingLabel === undefined && RW.timestamp),
             'aria-hidden': primaryStatus.trailingLabel === undefined ? undefined : true,
@@ -2095,7 +2273,11 @@ window.__ModuleLoader__.load({
       const archivedSessionIds = useWorkspaces((state) => state.archivedSessionIds);
       const pinnedSessionIds = useWorkspaces((state) => state.pinnedSessionIds);
       const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied);
-      const groupBy = useStore((s) => s.groupBy);
+      const storedGroupBy = useStore((s) => s.groupBy);
+      const viewMode = useMiniStore(viewModeStore);
+      // 生效分组模式：Host 域恢复 tagMode 时渲染标签聚合视图；否则以共享 view store
+      // 的内置模式为准（切回内置时 actions.setGroupBy 原样写共享实例，内置无缝接续）。
+      const groupBy = viewMode.tagMode ? 'tag' : storedGroupBy;
       const orderBy = useStore((s) => s.orderBy);
       const archivedFilter = useStore((s) => s.archivedFilter ?? 'default');
       const groupExpansion = useStore((s) => s.groupExpansion);
@@ -2106,6 +2288,15 @@ window.__ModuleLoader__.load({
           return;
         }
         open(sessionId);
+      };
+      // 标签模式行打开：沿用归档守卫；带查询时打开后清空搜索（对齐内置
+      // 搜索结果打开路径的收尾语义；无需 reveal——过滤树本身就含目标行）。
+      const openInTagGroups = (sessionId) => {
+        guardedOpen(sessionId);
+        if (normalizedQuery !== '') {
+          setQuery('');
+          changeSearchExpanded(false);
+        }
       };
       const leaveArchivedOnly = () => {
         actions.setArchivedFilter('default');
@@ -2286,7 +2477,7 @@ window.__ModuleLoader__.load({
         headerChildren.push(React.createElement('span', {
           key: 'label',
           className: clsx(WB.sectionLabel, WB.wide, searchExpanded && WB.sectionLabelHidden),
-        }, groupBy === 'flat' ? t('section.sessions') : t('section.workspaces')));
+        }, groupBy === 'flat' || groupBy === 'tag' ? t('section.sessions') : t('section.workspaces')));
         headerChildren.push(React.createElement('div', {
           key: 'searchSlot',
           className: clsx(WB.searchSlot, searchExpanded && WB.searchSlotExpanded),
@@ -2351,7 +2542,19 @@ window.__ModuleLoader__.load({
           groupBy,
           orderBy,
           archivedFilter,
-          onGroupPick: actions.setGroupBy,
+          onGroupPick: (mode) => {
+            // T4 模式持久化：内置模式写共享 view store（禁用回退时内置原样接续）
+            // 并同步 Host 域；标签模式只写 Host 域（内置键保持最后一个内置模式）。
+            if (mode === 'tag') {
+              viewModeStore.set({ restored: true, tagMode: true });
+            } else {
+              actions.setGroupBy(mode);
+              viewModeStore.set({ restored: true, tagMode: false });
+            }
+            tagActions.setMode(mode).catch((reason) => {
+              console.warn('session-tags: view mode persist failed:', reason);
+            });
+          },
           onOrderPick: (mode) => { actions.setOrderBy(mode, activeSessionOrders); },
           onArchivedFilterPick: actions.setArchivedFilter,
           t,
@@ -2395,7 +2598,7 @@ window.__ModuleLoader__.load({
       }));
       const listChildren = [];
       if (wide) {
-        if (normalizedQuery !== '') {
+        if (normalizedQuery !== '' && groupBy !== 'tag') {
           listChildren.push(React.createElement(SearchResults, {
             key: 'search',
             usePanelInfo,
@@ -2410,6 +2613,30 @@ window.__ModuleLoader__.load({
             query: normalizedQuery,
             remote: remoteSearch,
             resultLimit: searchResultLimit,
+            t,
+          }));
+        } else if (groupBy === 'tag') {
+          // T4 标签模式（含搜索态）：聚合视图本身承载「在分组结果内过滤」。
+          listChildren.push(React.createElement(TagGroupsView, {
+            key: 'tags',
+            usePanelInfo,
+            useSessionAccess,
+            useSessionStatus,
+            list,
+            home,
+            workspaces,
+            rowState,
+            onLeaveArchivedOnly: leaveArchivedOnly,
+            workspaceReady,
+            animationResetKey: groupBy + '/' + orderBy + '/' + archivedFilter,
+            open: openInTagGroups,
+            onSessionRenameRequest: requestSessionRename,
+            renderSlot,
+            openSessionMenu,
+            useContextMenuTarget,
+            useContextMenu,
+            query: normalizedQuery,
+            remote: remoteSearch,
             t,
           }));
         } else if (groupBy === 'flat') {
@@ -2635,6 +2862,9 @@ window.__ModuleLoader__.load({
       'groupBy.workspace': '按工作区',
       'groupBy.workspaceTree': '按工作区树',
       'groupBy.flat': '单列表',
+      'groupBy.tag': '按标签',
+      'group.pinned': '置顶',
+      'group.untagged': '未标签',
       'orderBy.label': '排序方式',
       'orderBy.manual': '手动排序',
       'orderBy.updated': '最近更新',
@@ -2722,6 +2952,9 @@ window.__ModuleLoader__.load({
       'groupBy.workspace': 'WorkSpace',
       'groupBy.workspaceTree': 'Workspace Tree',
       'groupBy.flat': 'In one list',
+      'groupBy.tag': 'By tag',
+      'group.pinned': 'Pinned',
+      'group.untagged': 'Untagged',
       'orderBy.label': 'Order by',
       'orderBy.manual': 'Manual',
       'orderBy.updated': 'Last updated',
@@ -2806,6 +3039,12 @@ window.__ModuleLoader__.load({
     let tagsStore = null;   // { loaded, pool: string[], bySession: Record<sessionId, string[]> }
     let editorRequest = null; // { sessionId, displayTitle } | null
     let tagActions = null;  // apply() 里赋值的 RPC 动作集
+    /**
+     * 视图模式（票 #5）：跨重启记忆走 Host 域（session_tags v2 的 mode 字段），
+     * tagMode 恢复后生效；内置模式仍以共享 view store（dsh.workspace.view.v5）为准，
+     * 两轨并存——内置键里永不出现 'tag' 值，禁用回退时内置读到的永远是合法内置模式。
+     */
+    let viewModeStore = null; // { restored, tagMode }
 
     /** 极简单文档 store（不依赖 dsh-client-store 内部 API；useSyncExternalStore 直连）。 */
     function createMiniStore(initial) {
@@ -3002,6 +3241,147 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * 标签分组头行（票 #5）：tag 组 = 色点（tagColorOf 派生，T3 同款）+ 标签名；
+     * 置顶段 = 图钉 + 本地化「置顶」；未标签段 = 队列图标 + 本地化「未标签」。
+     * 行样式复用内置编译类（RW.projectRow 系）；containsCurrent 时图标格点亮
+     * （folderActive 同款高亮语义）。分组头不含 workspace 菜单/新会话按钮
+     * （标签组没有对应动作面）。
+     */
+    function TagGroupHeader({ group, t }) {
+      return React.createElement('div', {
+        className: clsx(RW.projectRow),
+        'data-row-key': 'group:' + group.key,
+        role: 'treeitem',
+        'aria-expanded': group.expanded,
+        onClick: group.onToggle,
+      },
+        React.createElement('span', { className: clsx(RW.slot, RW.folder, group.containsCurrent && RW.folderActive) },
+          group.kind === 'tag'
+            ? React.createElement('span', { 'aria-hidden': true, style: { width: '10px', height: '10px', borderRadius: '50%', background: group.color, display: 'inline-block', flex: '0 0 auto' } })
+            : group.kind === 'pinned'
+              ? React.createElement(P.IconPinFillRegular, { size: 14 })
+              : React.createElement(P.IconQueueOutlineRegular, { size: 14 })),
+        React.createElement('span', { className: clsx(RW.slot, RW.chevron) },
+          React.createElement(P.IconTriangleRightFillRegular, { className: clsx(RW.arrow, group.expanded && RW.arrowOpen) })),
+        React.createElement('span', { className: RW.projectText },
+          React.createElement('span', { className: RW.title },
+            group.kind === 'pinned' ? t('group.pinned') : group.kind === 'untagged' ? t('group.untagged') : group.label)),
+      );
+    }
+
+    /**
+     * 标签模式聚合视图（票 #5）：deriveTagGroups 的渲染器。跨 workspace 聚合、
+     * 组头标签名+色点、行级 workspace 标注（SessionNodeItem sourceLabel）、
+     * 水位线（显示更多/收起，模式照 SessionTree）、组展开/收起。
+     * 展开态用本地 state（默认全展开）：共享 view store 的 retainAccountKeys
+     * 只保留 workspace 键，标签键入 store 会被清掉，故不入 store（重启后
+     * 标签组全展开，属选定取舍——跨重启记忆的契约只有模式选择本身）。
+     * 搜索（query/remote）经 tagSearchMatchIds 在分组结果内过滤；无匹配显示
+     * 内置「无匹配会话」文案。不提供拖拽排序（组内/组间序由纯函数固定，
+     * orderBy 菜单在标签模式不参与——spec 固定按最近活跃）。
+     */
+    function TagGroupsView({ list, workspaces, rowState, useSessionStatus, usePanelInfo, open, home, onLeaveArchivedOnly, workspaceReady, animationResetKey, useSessionAccess, onSessionRenameRequest, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, query, remote, t }) {
+      const panelActive = usePanelInfo((info) => info.activePanelId !== null);
+      const statuses = useSessionStatus((s) => s);
+      const snapshot = useMiniStore(tagsStore);
+      const current = panelActive ? undefined : mainSessionId(list);
+      const [collapsedKeys, setCollapsedKeys] = React.useState({});
+      const isExpanded = React.useCallback((key) => collapsedKeys[key] !== true, [collapsedKeys]);
+      const matchIds = React.useMemo(() => tagSearchMatchIds(list, workspaces, snapshot, query, remote), [list, workspaces, snapshot, query, remote]);
+      const groups = React.useMemo(() => deriveTagGroups(list, workspaces, rowState, statuses, snapshot, { isExpanded, matchIds }), [list, workspaces, rowState, statuses, snapshot, isExpanded, matchIds]);
+      const [storedWatermarks, setStoredWatermarks] = React.useState({});
+      const [watermarkMotionKey, setWatermarkMotionKey] = React.useState(0);
+      const baselines = new Map(groups.map((group) => [group.key, Math.max(SESSION_WATERMARK_BASE, requiredWatermark(group.sessions, current, undefined))]));
+      const sessionWatermarks = raiseWatermarks(storedWatermarks, baselines);
+      if (sessionWatermarks !== storedWatermarks) setStoredWatermarks((marks) => raiseWatermarks(marks, baselines));
+      const dropWatermarks = (drop) => {
+        if (!Object.keys(storedWatermarks).some(drop)) return;
+        setStoredWatermarks((marks) => Object.fromEntries(Object.entries(marks).filter(([key]) => !drop(key))));
+        setWatermarkMotionKey((key) => key + 1);
+      };
+      const now = Date.now();
+      const rowKeys = [];
+      const groupRows = [];
+      for (const group of groups) {
+        const watermark = sessionWatermarks[group.key] ?? SESSION_WATERMARK_BASE;
+        const collapsed = watermarkRows(group.sessions, baselines.get(group.key) ?? SESSION_WATERMARK_BASE);
+        const visible = watermarkRows(group.sessions, watermark);
+        const sessionsExpanded = visible.hiddenCount === 0;
+        rowKeys.push('group:' + group.key);
+        const rows = [
+          React.createElement(TagGroupHeader, {
+            key: 'header',
+            group: { ...group, onToggle: () => {
+              if (group.expanded) dropWatermarks((key) => key === group.key);
+              setCollapsedKeys((state) => ({ ...state, [group.key]: group.expanded }));
+            } },
+            t,
+          }),
+        ];
+        for (const node of visible.rows) {
+          rowKeys.push('session:' + node.id);
+          rows.push(React.createElement(SessionNodeItem, {
+            key: node.id,
+            node,
+            currentId: current,
+            now,
+            home,
+            onOpen: open,
+            onRenameRequest: onSessionRenameRequest,
+            renderSlot,
+            openSessionMenu,
+            useContextMenuTarget,
+            useContextMenu,
+            useSessionAccess,
+            sourceLabel: node.workspace === '' ? t('group.ungrouped') : node.workspace,
+            t,
+          }));
+        }
+        if (collapsed.hiddenCount > 0) {
+          rowKeys.push('overflow:' + group.key);
+          rows.push(React.createElement('button', {
+            key: 'overflow',
+            type: 'button',
+            className: WB.sessionOverflowButton,
+            'data-row-key': 'overflow:' + group.key,
+            'aria-expanded': sessionsExpanded,
+            onClick: () => {
+              if (sessionsExpanded) {
+                dropWatermarks((key) => key === group.key);
+                return;
+              }
+              setStoredWatermarks((marks) => ({
+                ...marks,
+                [group.key]: visible.hiddenCount <= SESSION_WATERMARK_BASE ? Infinity : watermark + SESSION_WATERMARK_BASE,
+              }));
+              setWatermarkMotionKey((key) => key + 1);
+            },
+          }, sessionsExpanded ? t('sessions.collapse') : t('sessions.expand', { n: visible.hiddenCount })));
+        }
+        groupRows.push(React.createElement('div', { key: group.key, className: WB.groupSection }, rows));
+      }
+      const searchActive = matchIds !== null;
+      return React.createElement(P.HoverCardGroup, {
+        className: clsx(WB.treeBody, WB.wide),
+      },
+        React.createElement(P.AnimatedRows, {
+          key: 'rows',
+          className: clsx(WB.list),
+          role: 'tree',
+          label: t('section.sessions'),
+          rowKeys: rowKeys.length === 0 ? ['empty'] : rowKeys,
+          ready: list.phase === 'ready' && workspaceReady,
+          resetKey: JSON.stringify([animationResetKey, watermarkMotionKey, searchActive]),
+        },
+          rowKeys.length === 0 && (searchActive
+            ? React.createElement('div', { key: 'none', className: WB.empty }, t('search.noMatches'))
+            : React.createElement(EmptySessions, { rowState, onLeaveArchivedOnly, t })),
+          groupRows),
+        React.createElement('span', { key: 'fade', className: WB.fade }),
+      );
+    }
+
     return {
       inject: ['slots', 'locale', 'sessions', 'workspaces', 'uiWorkspace', 'contextMenus', 'remote', 'remoteAccess', 'shortcuts', 'connection'],
       apply(ctx) {
@@ -3063,6 +3443,7 @@ window.__ModuleLoader__.load({
         // -------------------------------------------------------------------
         tagsStore = createMiniStore({ loaded: false, pool: [], bySession: {} });
         editorRequest = createMiniStore(null);
+        viewModeStore = createMiniStore({ restored: false, tagMode: false });
 
         /** 连接信封展开：{ ok:true, value } → value；失败/异形一律抛 Error。 */
         const callTags = async (method, args) => {
@@ -3097,6 +3478,15 @@ window.__ModuleLoader__.load({
           async createAndAttach(sessionId, name) {
             const value = await callTags('createAndAttach', { sessionId, name });
             patchSession(sessionId, value.pool, value.tags);
+          },
+          /** 视图模式读写（票 #5：Host 域 mode 字段，跨重启记忆）。 */
+          async getMode() {
+            const value = await callTags('getViewMode', {});
+            return value.mode;
+          },
+          async setMode(mode) {
+            const value = await callTags('setViewMode', { mode });
+            return value.mode;
           },
         };
 
@@ -3145,6 +3535,15 @@ window.__ModuleLoader__.load({
         // 首屏全量镜像（异步，失败只降级为「弹层打开时再取」，不阻塞 shadow 渲染）。
         tagActions.refreshAll().catch((error) => {
           console.warn('session-tags: initial tag snapshot failed:', error);
+        });
+
+        // 模式恢复（票 #5：跨重启记忆）：Host 域 mode='tag' 时恢复标签聚合视图；
+        // 其余值不动共享 view store（内置模式以它为准）；失败降级内置模式。
+        tagActions.getMode().then((mode) => {
+          viewModeStore.set({ restored: true, tagMode: mode === 'tag' });
+        }).catch((error) => {
+          viewModeStore.set({ restored: true, tagMode: false });
+          console.warn('session-tags: view mode restore failed:', error);
         });
       },
       /**
@@ -3208,6 +3607,13 @@ window.__ModuleLoader__.load({
         tagDotSize,
         tagDotTitle,
         normalizeTagName,
+        TAG_PINNED_KEY,
+        TAG_UNTAGGED_KEY,
+        TAG_GROUP_KEY_PREFIX,
+        canonicalTagNames,
+        workspaceLabelOf,
+        deriveTagGroups,
+        tagSearchMatchIds,
       },
     };
   },

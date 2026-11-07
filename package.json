@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "会话标签：给会话打标签并按标签分组浏览（T3 数据层与打标入口）",
+  "description": "会话标签：给会话打标签，并在浏览区分组选项里按标签聚合查看（T4 聚合视图）",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { createTagService, EMPTY_TAG_GLOBAL, tagGlobalSchema } from '../tag-store.js';
+import { createTagService, EMPTY_TAG_GLOBAL, TAG_DOMAIN_SPEC, tagGlobalSchema } from '../tag-store.js';
 
 /** 内存 storage backend：只实现服务用到的 `global.get/set` 语义。 */
 function makeMemoryDomain(initial) {
@@ -193,11 +193,11 @@ describe('名称规整', () => {
 });
 
 describe('全局 JSON 形状（落盘文档）', () => {
-  it('写入的全局文档是规整的 v1 形状，可被 schema 原样接受', async () => {
+  it('写入的全局文档是规整的 v2 形状（含 mode），可被 schema 原样接受', async () => {
     const domain = makeMemoryDomain();
     const service = await serviceOver(domain);
     await service.setSessionTags({ sessionId: 's1', tags: ['a', 'b'] });
-    expect(domain.writes[0]).toEqual({ v: 1, tags: ['a', 'b'], bySession: { s1: ['a', 'b'] } });
+    expect(domain.writes[0]).toEqual({ v: 2, tags: ['a', 'b'], bySession: { s1: ['a', 'b'] }, mode: 'workspace' });
     expect(tagGlobalSchema.safeParse(domain.writes[0]).success).toBe(true);
   });
 });
@@ -220,5 +220,53 @@ describe('标签服务：空池与空关联', () => {
   it('全局 schema 拒绝 null（storage domain 的「从未写入」哨兵不得被当数据）', () => {
     expect(tagGlobalSchema.safeParse(null).success).toBe(false);
     expect(tagGlobalSchema.safeParse(EMPTY_TAG_GLOBAL()).success).toBe(true);
+  });
+});
+
+describe('视图模式持久化（票 #5 / T4：domain v1→v2 加 mode 字段）', () => {
+  it('EMPTY_TAG_GLOBAL 是 v2 形状且 mode 默认 workspace', () => {
+    expect(EMPTY_TAG_GLOBAL()).toEqual({ v: 2, tags: [], bySession: {}, mode: 'workspace' });
+  });
+
+  it('parse 迁移：v1 文档（无 mode）读出为 v2 形状并补默认 mode（旧落盘数据升级后可读）', () => {
+    const migrated = tagGlobalSchema.parse({ v: 1, tags: ['a'], bySession: { s1: ['a'] } });
+    expect(migrated).toEqual({ v: 2, tags: ['a'], bySession: { s1: ['a'] }, mode: 'workspace' });
+  });
+
+  it('parse：合法 mode 原样保留；非法/缺失 mode 规整回默认（宽进，open 永不炸）', () => {
+    expect(tagGlobalSchema.parse({ v: 2, tags: [], bySession: {}, mode: 'tag' }).mode).toBe('tag');
+    expect(tagGlobalSchema.parse({ v: 2, tags: [], bySession: {}, mode: 'workspace-tree' }).mode).toBe('workspace-tree');
+    expect(tagGlobalSchema.parse({ v: 2, tags: [], bySession: {}, mode: 'nonsense' }).mode).toBe('workspace');
+    expect(tagGlobalSchema.parse({ v: 2, tags: [], bySession: {}, mode: 42 }).mode).toBe('workspace');
+    expect(tagGlobalSchema.parse({ v: 1, tags: [], bySession: {} }).mode).toBe('workspace');
+  });
+
+  it('getViewMode → 默认 workspace；setViewMode 写入并可回读，落盘文档是 v2 形状', async () => {
+    const domain = makeMemoryDomain();
+    const service = await serviceOver(domain);
+    expect(await service.getViewMode()).toEqual({ mode: 'workspace' });
+    expect(await service.setViewMode({ mode: 'tag' })).toEqual({ mode: 'tag' });
+    expect(await service.getViewMode()).toEqual({ mode: 'tag' });
+    expect(domain.writes.at(-1)).toEqual({ v: 2, tags: [], bySession: {}, mode: 'tag' });
+  });
+
+  it('setViewMode 不动标签数据（只写 mode）', async () => {
+    const domain = makeMemoryDomain();
+    const service = await serviceOver(domain);
+    await service.setSessionTags({ sessionId: 's1', tags: ['a'] });
+    await service.setViewMode({ mode: 'flat' });
+    expect(await service.listAll()).toEqual({ pool: ['a'], bySession: { s1: ['a'] } });
+    expect(domain.writes.at(-1)).toEqual({ v: 2, tags: ['a'], bySession: { s1: ['a'] }, mode: 'flat' });
+  });
+
+  it('setViewMode 拒绝非法 mode（invalid-args）', async () => {
+    const service = await serviceOver(makeMemoryDomain());
+    await expect(service.setViewMode({ mode: 'bogus' })).rejects.toMatchObject({ code: 'invalid-args' });
+    await expect(service.setViewMode({})).rejects.toMatchObject({ code: 'invalid-args' });
+  });
+
+  it('domain spec 升 v2 且 compatibleVersions 含 1（storage json backend 对 unit 版本戳做校验，缺了会 version-mismatch → 插件激活失败）', () => {
+    expect(TAG_DOMAIN_SPEC.version).toBe(2);
+    expect(TAG_DOMAIN_SPEC.compatibleVersions).toContain(1);
   });
 });

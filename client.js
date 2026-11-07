@@ -627,6 +627,39 @@ window.__ModuleLoader__.load({
       return true;
     }
 
+    /**
+     * 共享 view store 形状校验：句柄可 create 且实例带关键视图 actions
+     * （内置把 handle 通过注册 options.store 传给 sidebar.workspaces，也传给
+     * archived/stoppedAndArchived 两条归档 toast 的 keyed 注册，uiw client.js:4706-4747、6076）。
+     */
+    function isValidViewStoreHandle(handle) {
+      if (handle === null || typeof handle !== 'object' || typeof handle.create !== 'function') return false;
+      try {
+        const instance = handle.create();
+        return instance !== null && typeof instance === 'object'
+          && instance.actions !== undefined
+          && typeof instance.actions.setArchivedFilter === 'function'
+          && typeof instance.actions.setGroupBy === 'function';
+      } catch {
+        return false;
+      }
+    }
+
+    /**
+     * 从 slot entries 里选可共享的 view store 句柄：内置在位（先于本插件注册）时返回其句柄，
+     * 本插件注册与其同 store——归档 toast 的「显示已归档」、uiWorkspace.pinSession 的
+     * 本地序写、本 shadow 的视图写全部落在同一实例，禁用回退/双实例漂移即消除
+     * （uiw client.js:5910-5922 showArchived 写 viewInstance；1551-1558 pin 写 view）。
+     * 内置未在位（本插件先注册）时返回 null → 回退本地实例（与 T1 快捷键探测同一降级语义）。
+     */
+    function pickSharedViewStore(entries) {
+      for (const entry of entries ?? []) {
+        const store = entry?.options?.store ?? entry?.store;
+        if (isValidViewStoreHandle(store)) return store;
+      }
+      return null;
+    }
+
     /** Show the blank row plus the first `watermark` non-blank rows（uiw client.js:2953-2964）。 */
     function watermarkRows(sessions, watermark) {
       let count = 0;
@@ -2337,6 +2370,8 @@ window.__ModuleLoader__.load({
         shortcutPatchForCloseAdd,
         shortcutPatchForDirectoryBusy,
         applyShortcutPatch,
+        isValidViewStoreHandle,
+        pickSharedViewStore,
         orderByRecency,
         reconcileManualOrder,
         pinCurrentBlank,

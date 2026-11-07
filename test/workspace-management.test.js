@@ -246,3 +246,39 @@ describe('shortcutPatches（workspace.add 快捷键 store 补丁，uiw 39-71 语
     expect(calls).toEqual([{ addRequested: true, directoryBusy: false }]);
   });
 });
+
+describe('pickSharedViewStore（共享视图 store 探测，归档 toast / pin 序联动的关键）', () => {
+  /** 造一个形状合法的 view store 句柄（内置 browserInjected 注册 options.store 同形）。 */
+  const validHandle = () => ({
+    create: () => ({ actions: { setArchivedFilter: () => {}, setGroupBy: () => {} } }),
+  });
+
+  it('从 slot entries 的 options.store（或裸 store）里选第一个形状合法的句柄', () => {
+    const handle = validHandle();
+    expect(logic.pickSharedViewStore([{ id: 'builtin', options: { store: handle } }])).toBe(handle);
+    expect(logic.pickSharedViewStore([{ id: 'bare', store: handle }])).toBe(handle);
+  });
+
+  it('无 options.store 的条目跳过；全部不合法返回 null（回退本地实例）', () => {
+    expect(logic.pickSharedViewStore([])).toBeNull();
+    expect(logic.pickSharedViewStore([{ id: 'x', options: {} }])).toBeNull();
+    expect(logic.pickSharedViewStore([null, { id: 'x', options: { store: null } }])).toBeNull();
+  });
+
+  it('形状校验拒绝缺 create / create 抛错 / 缺关键 actions 的句柄', () => {
+    expect(logic.pickSharedViewStore([{ options: { store: {} } }])).toBeNull();
+    expect(logic.pickSharedViewStore([{ options: { store: { create: () => { throw new Error('torn down'); } } } }])).toBeNull();
+    expect(logic.pickSharedViewStore([{ options: { store: { create: () => ({ actions: {} }) } } }])).toBeNull();
+    expect(logic.pickSharedViewStore([{ options: { store: { create: () => null } } }])).toBeNull();
+  });
+
+  it('多个条目时取首个合法者（先注册者优先，与内置共存时即内置句柄）', () => {
+    const first = validHandle();
+    const picked = logic.pickSharedViewStore([
+      { id: 'a', options: {} },
+      { id: 'b', options: { store: first } },
+      { id: 'c', options: { store: validHandle() } },
+    ]);
+    expect(picked).toBe(first);
+  });
+});

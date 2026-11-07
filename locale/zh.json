@@ -47,6 +47,20 @@
   "tags.list.aria": "标签列表",
   "tags.input.aria": "新标签名",
   "actions.unarchive": "取消归档",
+  "workspace.add": "添加工作区",
+  "menu.addWorkspace": "添加工作区…",
+  "picker.loading": "正在加载工作区…",
+  "folderError.title": "无法打开文件夹",
+  "folderError.retry": "重新选择",
+  "rename": "重命名",
+  "rename.workspace.title": "重命名工作区",
+  "field.workspaceName": "工作区名称",
+  "conflict.named": "已存在名为“{name}”的工作区。",
+  "delete.workspace": "删除工作区",
+  "delete.desc": "将把“{name}”从工作区列表中移除。文件夹与会话记录会保留，其会话将显示在“未分组”下。",
+  "delete.pending": "正在删除工作区…",
+  "close": "关闭",
+  "cancel": "取消",
   "actions.workspace.aria": "工作区“{name}”的操作",
   "actions.session.aria": "会话“{name}”的操作",
   "actions.newSession": "新会话",
@@ -71,5 +85,6 @@
   "time.days": "{n}天",
   "time.months": "{n}个月",
   "time.years": "{n}年",
-  "time.ago": "{t}前"
+  "time.ago": "{t}前",
+  "hover.created": "创建于 {time}"
 }

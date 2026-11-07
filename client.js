@@ -13,10 +13,13 @@
  *   548-549 `nextPriority = 0` 起步）；内置占用者无显式 priority。本插件以显式 `SHADOW_PRIORITY` 参选，
  *   首次装载后用 Inspect `client/Slots/listSubTree root="sidebar.workspaces"` 实证选举方向。
  *
- * 复刻范围（票 #2）：workspace 节列表、会话行（状态点/时间/置顶标记）、打开会话、workspace 选中态、
- * 搜索（本地过滤 + sessions.search 合并）、ViewOptionsMenu（分组/排序/归档筛选）、手动排序拖拽、
- * 水位线（显示更多）。**不做**（T2/T3/T4）：workspace 对话框、添加工作区目录流、悬停卡、归档动作入口、
- * 标签任何内容。
+ * 复刻范围：T1（票 #2）——workspace 节列表、会话行（状态点/时间/置顶标记）、打开会话、
+ * workspace 选中态、搜索（本地过滤 + sessions.search 合并）、ViewOptionsMenu（分组/排序/归档筛选）、
+ * 手动排序拖拽、水位线（显示更多）。T2（票 #3）增量——workspace 添加（目录流 PickFlow）/
+ * 重命名/删除对话框、添加工作区按钮、会话/workspace 悬停卡。归档/置顶/会话重命名/
+ * 归档确认框/行 toast 由内置的独立 slot 注册继续供给（见「子座位保活」），本插件通过
+ * 共享 store 探测（快捷键/重命名请求/工作区动作请求/toast 通道）与共享 view store
+ * 句柄（归档 toast 的筛选动作、pin 本地序）与内置保持一致。**不做**（T3/T4）：标签任何内容。
  *
  * 子座位保活（07 简报 §1）：本注册原样声明内置的五个 children（directoryFlow / session.row.action /
  * session.row.leading / session.row.trailing / session.row.hover），并以相同 props renderSlot——
@@ -146,6 +149,27 @@ window.__ModuleLoader__.load({
       timestamp: 'wnFoaW_timestamp',
       title: 'wnFoaW_title',
       visuallyHidden: 'wnFoaW_visuallyHidden',
+      // T2 悬停卡新增（Rows.module.css 映射 uiw client.js:1964-2005）
+      hoverArchived: 'wnFoaW_hoverArchived',
+      hoverContent: 'wnFoaW_hoverContent',
+      hoverPath: 'wnFoaW_hoverPath',
+      hoverStatus: 'wnFoaW_hoverStatus',
+      hoverTime: 'wnFoaW_hoverTime',
+      hoverTitle: 'wnFoaW_hoverTitle',
+      meta: 'wnFoaW_meta',
+    };
+    /**
+     * WorkspacePicker.module.css 的编译类名映射（uiw client.js:2724-2731）。
+     * 样式本体由内置插件物化时注入（style[data-plugin-css]，uiw client.js:2716-2723）；
+     * DSH 升级后如类名漂移，与 WB_/RW_ 一并重抽。
+     */
+    const WP = {
+      disambiguated: 'ZOVoma_disambiguated',
+      menuStatus: 'ZOVoma_menuStatus',
+      modalAction: 'ZOVoma_modalAction',
+      modalError: 'ZOVoma_modalError',
+      pathSuffix: 'ZOVoma_pathSuffix',
+      title: 'ZOVoma_title',
     };
 
     /** 极简 clsx（内置同款语义，uiw client.js:1720-1735）。 */
@@ -504,6 +528,162 @@ window.__ModuleLoader__.load({
     /** workspace 存储标题 → 显示标题（uiw client.js:1950-1952）。 */
     function workspaceDisplayTitle(title, localizedDefault) {
       return title === DEFAULT_WORKSPACE_DIRECTORY ? localizedDefault : title;
+    }
+
+    /**
+     * 同名 workspace 的消歧路径尾段（uiw client.js:2697-2712）：标题唯一者无条目；
+     * 同名者各取「最短的、无其他同名行与之相同的尾段」（slice(-(2n-1)) 个分段元素，
+     * 分隔符随 split 保留在段里）。
+     */
+    function distinguishingPathSuffixes(workspaces) {
+      const rows = workspaces.map((workspace) => ({
+        ...workspace,
+        parts: workspace.path.split(/([\\/])/),
+      }));
+      const suffix = (parts, count) => parts.slice(-(2 * count - 1)).join('');
+      const suffixes = new Map();
+      for (const row of rows) {
+        const peers = rows.filter((other) => other !== row && other.title === row.title);
+        if (peers.length === 0) continue;
+        let count = 1;
+        while (2 * count - 1 < row.parts.length && (suffix(row.parts, count) === '' || peers.some((peer) => suffix(peer.parts, count) === suffix(row.parts, count)))) count++;
+        suffixes.set(row.id, suffix(row.parts, count));
+      }
+      return suffixes;
+    }
+
+    /**
+     * workspace 重命名对话框的校验规则（uiw client.js:1805-1807）：trim 非空、
+     * 不与存储标题相同、不与其他 workspace 标题重名（重名比较用传入列表的
+     * title 字段，排除自身；提交进行中一律 blocked）。
+     */
+    function workspaceRenameReview(draft, request, workspaces, renaming) {
+      const trimmed = draft.trim();
+      const duplicate = request !== null && trimmed !== '' && workspaces.some((workspace) => workspace.workspaceId !== request.workspaceId && workspace.title === trimmed);
+      const blocked = renaming || trimmed === '' || request === null || trimmed === request.storedTitle || duplicate;
+      return { trimmed, duplicate, blocked };
+    }
+
+    /**
+     * 悬停卡时间变体：距离值套 ago 模板、now 桶保持裸词（uiw client.js:2123-2126）。
+     * relative 由组件注入（P.relativeTime），纯逻辑层不依赖 primitives。
+     */
+    function hoverTimeLabel(relative, updatedAt, now, t) {
+      const { unit, n } = relative(updatedAt, now);
+      return unit === 'now' ? t('time.now') : t('time.ago', { t: t('time.' + unit, { n }) });
+    }
+
+    /**
+     * 悬停卡绝对创建时间：走词表 date.ymd 模板 + 两位补零本地时分
+     * （uiw client.js:2132-2140；不用 toLocaleString——那会跟浏览器语言混排）。
+     */
+    function createdLabel(createdAt, t) {
+      const date = new Date(createdAt);
+      const pad2 = (value) => String(value).padStart(2, '0');
+      return t('hover.created', { time: `${t('date.ymd', {
+        y: date.getFullYear(),
+        m: date.getMonth() + 1,
+        d: date.getDate(),
+      })} ${pad2(date.getHours())}:${pad2(date.getMinutes())}` });
+    }
+
+    /**
+     * 悬停卡状态行（uiw client.js:2401-2402）：归档行剔除 done/idle 状态，
+     * 活动态（warning/ongoing）保留。
+     */
+    function hoverStatuses(node, t) {
+      return sessionStatuses(node, t).filter((status) => !(node.archived && (status.state === 'done' || status.state === 'idle')));
+    }
+
+    /**
+     * 添加工作区目录流的状态机（uiw client.js:2740-2900 语义抽取）：
+     * state = {flowOpen, pickingFolder, errorOpen, modalError}；reduce 返回
+     * {state, effects}，effects 由组件执行（close=收外层菜单、pick=交外层采纳后续）。
+     * 语义：openFlow 先收菜单再清错误开流（2815-2820）；采纳忙时流保持打开（2831-2849）；
+     * 成功关流交 onPick、失败关流进错误模态（2807-2814）；占位者消失即收流（2753-2755）。
+     */
+    function createPickFlowMachine() {
+      const initial = () => ({ flowOpen: false, pickingFolder: false, errorOpen: false, modalError: null });
+      const flowBusy = (state) => state.flowOpen || state.pickingFolder;
+      const reduce = (state, event) => {
+        switch (event.type) {
+          case 'openFlow':
+          case 'selectAdd':
+            return { state: { ...state, flowOpen: true, errorOpen: false, modalError: null }, effects: [{ type: 'close' }] };
+          case 'pickSubmitted':
+            return { state: { ...state, pickingFolder: true }, effects: [] };
+          case 'adoptSucceeded':
+            return { state: { ...state, flowOpen: false, pickingFolder: false }, effects: [{ type: 'pick', workspaceId: event.workspaceId }] };
+          case 'adoptFailed':
+            return { state: { ...state, flowOpen: false, pickingFolder: false, errorOpen: true, modalError: event.message }, effects: [] };
+          case 'flowCancel':
+          case 'flowUnavailable':
+            return { state: { ...state, flowOpen: false }, effects: [] };
+          case 'flowError':
+            return { state: { ...state, flowOpen: false, errorOpen: true, modalError: event.message }, effects: [] };
+          case 'errorDismiss':
+            return { state: { ...state, errorOpen: false, modalError: null }, effects: [] };
+          default:
+            return { state, effects: [] };
+        }
+      };
+      /** 仅当 picker 开着、add 是唯一菜单入口且不忙时自动直开目录流（uiw client.js:2821-2830）。 */
+      const autoOpenShouldFire = ({ open, addIsTheOnlyEntry, flowBusy: busy }) => open === true && addIsTheOnlyEntry === true && busy !== true;
+      return { initial, flowBusy, reduce, autoOpenShouldFire };
+    }
+
+    /** workspace.add 快捷键三补丁（uiw client.js:39-71 controls.add/closeAdd/directoryBusy 语义）。 */
+    function shortcutPatchForAdd(snapshot) {
+      return snapshot.directoryBusy ? {} : { addRequested: true };
+    }
+
+    function shortcutPatchForCloseAdd() {
+      return { addRequested: false };
+    }
+
+    function shortcutPatchForDirectoryBusy(busy) {
+      return { directoryBusy: busy };
+    }
+
+    /** 把补丁写入快捷键 store（内置或探测到的共享 store）；缺读取/写入面时安全跳过。 */
+    function applyShortcutPatch(store, patch) {
+      if (store === null || typeof store !== 'object') return false;
+      if (typeof store.getSnapshot !== 'function' || typeof store.set !== 'function') return false;
+      store.set({ ...store.getSnapshot(), ...patch });
+      return true;
+    }
+
+    /**
+     * 共享 view store 形状校验：句柄可 create 且实例带关键视图 actions
+     * （内置把 handle 通过注册 options.store 传给 sidebar.workspaces，也传给
+     * archived/stoppedAndArchived 两条归档 toast 的 keyed 注册，uiw client.js:4706-4747、6076）。
+     */
+    function isValidViewStoreHandle(handle) {
+      if (handle === null || typeof handle !== 'object' || typeof handle.create !== 'function') return false;
+      try {
+        const instance = handle.create();
+        return instance !== null && typeof instance === 'object'
+          && instance.actions !== undefined
+          && typeof instance.actions.setArchivedFilter === 'function'
+          && typeof instance.actions.setGroupBy === 'function';
+      } catch {
+        return false;
+      }
+    }
+
+    /**
+     * 从 slot entries 里选可共享的 view store 句柄：内置在位（先于本插件注册）时返回其句柄，
+     * 本插件注册与其同 store——归档 toast 的「显示已归档」、uiWorkspace.pinSession 的
+     * 本地序写、本 shadow 的视图写全部落在同一实例，禁用回退/双实例漂移即消除
+     * （uiw client.js:5910-5922 showArchived 写 viewInstance；1551-1558 pin 写 view）。
+     * 内置未在位（本插件先注册）时返回 null → 回退本地实例（与 T1 快捷键探测同一降级语义）。
+     */
+    function pickSharedViewStore(entries) {
+      for (const entry of entries ?? []) {
+        const store = entry?.options?.store ?? entry?.store;
+        if (isValidViewStoreHandle(store)) return store;
+      }
+      return null;
     }
 
     /** Show the blank row plus the first `watermark` non-blank rows（uiw client.js:2953-2964）。 */
@@ -877,6 +1057,41 @@ window.__ModuleLoader__.load({
       }, React.createElement(P.IconPinFillRegular, { size: 14 }));
     }
 
+    /** workspace 悬停卡内容：标题、缩略目录路径、绝对创建时间（uiw client.js:2142-2160）。 */
+    function WorkspaceHoverContent({ label, cwd, createdAt, t }) {
+      return React.createElement('div', { className: RW.hoverContent },
+        React.createElement('div', { className: RW.hoverTitle }, label),
+        React.createElement('div', { className: RW.hoverPath }, cwd),
+        React.createElement('div', { className: RW.hoverTime }, createdLabel(createdAt, t)),
+      );
+    }
+
+    /**
+     * 会话悬停卡内容（uiw client.js:2401-2429）：全标题、cwd 缩略、相对时间
+     * （ago 模板，blank 行没有时间行）、`sidebar.session.row.hover` 扩展段、
+     * 每状态一行（StateDot+文案；归档行剔除 done/idle 状态）、归档行加归档图标行。
+     */
+    function SessionHoverContent({ node, cwd, now, renderSlot, t }) {
+      const statuses = hoverStatuses(node, t);
+      const children = [
+        React.createElement('div', { key: 'title', className: RW.hoverTitle }, displayTitle(node, t)),
+      ];
+      if (cwd !== undefined) children.push(React.createElement('div', { key: 'cwd', className: RW.hoverPath }, cwd));
+      if (!node.blank) children.push(React.createElement('div', { key: 'time', className: RW.hoverTime }, hoverTimeLabel(P.relativeTime, node.updatedAt, now, t)));
+      children.push(React.createElement(React.Fragment, { key: 'hover-slot' }, renderSlot('sidebar.session.row.hover', { sessionId: node.id })));
+      for (const status of statuses) {
+        children.push(React.createElement('div', { key: status.label, className: RW.hoverStatus },
+          React.createElement(P.StateDot, { state: status.state }),
+          React.createElement('span', null, status.label)));
+      }
+      if (node.archived) {
+        children.push(React.createElement('div', { key: 'archived', className: clsx(RW.hoverStatus, RW.hoverArchived) },
+          React.createElement(P.IconArchiveOutlineRegular, { size: 14 }),
+          React.createElement('span', null, t('row.archived'))));
+      }
+      return React.createElement('div', { className: RW.hoverContent }, children);
+    }
+
     /** 空态占位（uiw client.js:3152-3168）。 */
     function EmptySessions({ rowState, onLeaveArchivedOnly, t }) {
       const archivedOnly = rowState.archivedFilter === 'only';
@@ -965,7 +1180,7 @@ window.__ModuleLoader__.load({
       return React.createElement(ProjectRow, { ...props, access });
     }
 
-    function ProjectRow({ group, containsCurrentDescendant = false, onToggle, onCreate, drag: offeredDrag, newShortcut, t, access, openWorkspaceMenu, useContextMenuTarget, useContextMenu }) {
+    function ProjectRow({ group, containsCurrentDescendant = false, onToggle, onCreate, drag: offeredDrag, home, newShortcut, t, access, openWorkspaceMenu, useContextMenuTarget, useContextMenu }) {
       const { getTriggerProps } = useContextMenu();
       const drag = access.reorder ? offeredDrag : undefined;
       const row = group;
@@ -976,7 +1191,7 @@ window.__ModuleLoader__.load({
       const workspaceMenuTarget = row.workspaceId !== undefined && row.cwd !== undefined
         ? { workspaceId: row.workspaceId, path: row.cwd }
         : undefined;
-      return React.createElement('div', {
+      const ownRow = React.createElement('div', {
         className: clsx(RW.projectRow, menuOpen && RW.menuOpen),
         'data-row-key': 'workspace:' + group.key,
         role: 'treeitem',
@@ -1035,6 +1250,23 @@ window.__ModuleLoader__.load({
           }, React.createElement(P.IconNewChatOutlineRegular, { size: 14 }))),
         ),
       );
+      // 真 workspace 才有悬停卡（未分组桶无 createdAt，uiw client.js:2303-2319）。
+      if (row.createdAt === undefined) return ownRow;
+      return React.createElement(P.HoverCard, {
+        anchor: ownRow,
+        content: React.createElement(WorkspaceHoverContent, {
+          label: row.label,
+          cwd: row.cwd === undefined ? undefined : abbreviateHomePath(row.cwd, home),
+          createdAt: row.createdAt,
+          t,
+        }),
+        openDelayMs: 800,
+        grouped: true,
+        disabled: menuOpen,
+        copyText: row.cwd,
+        copyLabel: t('copy'),
+        copiedLabel: t('hover.copied'),
+      });
     }
 
     /**
@@ -1042,7 +1274,7 @@ window.__ModuleLoader__.load({
      * T1 差异：不包 HoverCard（悬停卡 = T2）；行首/行尾装饰位与「...」菜单、快捷动作列表
      * （renderSlot('sidebar.workspaces.session.row.action')）原样保留。
      */
-    function SessionNodeItem({ node, currentId, now, onOpen, onRenameRequest, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, onReveal, drag, useSessionAccess, t }) {
+    function SessionNodeItem({ node, currentId, now, onOpen, onRenameRequest, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, onReveal, drag, home, useSessionAccess, t }) {
       const { getTriggerProps } = useContextMenu();
       const row = node;
       const title = displayTitle(node, t);
@@ -1069,7 +1301,7 @@ window.__ModuleLoader__.load({
         rowRef.current?.scrollIntoView({ block: 'nearest' });
         onReveal();
       }, [onReveal]);
-      return React.createElement('div', {
+      const anchor = React.createElement('div', {
         ref: rowRef,
         'data-row-key': 'session:' + node.id,
         className: clsx(RW.sessionRow, selected && RW.selected, menuOpen && RW.menuOpen, row.archived && RW.archived, drag?.marker === 'before' && RW.dropBefore, drag?.marker === 'after' && RW.dropAfter),
@@ -1156,10 +1388,27 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: RW.rowQuickActions },
             renderSlot('sidebar.workspaces.session.row.action', { sessionId: node.id, displayTitle: row.title }))),
       );
+      // 整行作悬停卡锚点：菜单/拖拽开启时禁用；copy 文本 = 标题（blank/空标题不给，uiw client.js:2557-2684）。
+      return React.createElement(P.HoverCard, {
+        anchor,
+        content: React.createElement(SessionHoverContent, {
+          node,
+          cwd: row.cwd === undefined ? undefined : abbreviateHomePath(row.cwd, home),
+          now,
+          renderSlot,
+          t,
+        }),
+        openDelayMs: 800,
+        grouped: true,
+        disabled: menuOpen || drag?.active === true,
+        copyText: row.blank || row.title === '' ? undefined : row.title,
+        copyLabel: t('copy'),
+        copiedLabel: t('hover.copied'),
+      });
     }
 
     /** 分组树（uiw client.js:3170-3500，原样复刻含水位线与拖拽）。 */
-    function SessionTree({ list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds, rowState, onLeaveArchivedOnly, workspaceReady, animationResetKey, usePanelInfo, useRemoteAccess, useSessionAccess, useWorkspaceAccess, onSessionRenameRequest, renderSlot, openSessionMenu, openWorkspaceMenu, useContextMenuTarget, useContextMenu, insertWorkspaceBefore, nestWorkspaces, groupExpansion, setGroupExpanded, setSessionOrder, t, revealSessionId, onSessionRevealed, shortcuts }) {
+    function SessionTree({ list, useSessionStatus, startSession, open, workspaces, ungroupedSessionIds, rowState, onLeaveArchivedOnly, workspaceReady, animationResetKey, usePanelInfo, useRemoteAccess, useSessionAccess, useWorkspaceAccess, onSessionRenameRequest, renderSlot, openSessionMenu, openWorkspaceMenu, useContextMenuTarget, useContextMenu, insertWorkspaceBefore, nestWorkspaces, groupExpansion, setGroupExpanded, setSessionOrder, home, t, revealSessionId, onSessionRevealed, shortcuts }) {
       const panelActive = usePanelInfo((info) => info.activePanelId !== null);
       const statuses = useSessionStatus((s) => s);
       const current = panelActive ? undefined : mainSessionId(list);
@@ -1306,6 +1555,7 @@ window.__ModuleLoader__.load({
             key: 'header',
             newShortcut: shortcuts.find((row) => row.id === 'session.new'),
             group,
+            home,
             openWorkspaceMenu,
             useContextMenu,
             useContextMenuTarget,
@@ -1358,6 +1608,7 @@ window.__ModuleLoader__.load({
             node,
             currentId: current,
             now,
+            home,
             onOpen: open,
             onRenameRequest: onSessionRenameRequest,
             renderSlot,
@@ -1442,7 +1693,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 平铺列表（uiw client.js:3502-3592）。 */
-    function FlatList({ list, sessionIds, rowState, onLeaveArchivedOnly, useSessionStatus, useSessionAccess, open, onSessionRenameRequest, usePanelInfo, setSessionOrder, workspaceReady, animationResetKey, revealSessionId, onSessionRevealed, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, t }) {
+    function FlatList({ list, sessionIds, rowState, onLeaveArchivedOnly, useSessionStatus, useSessionAccess, open, onSessionRenameRequest, usePanelInfo, setSessionOrder, workspaceReady, animationResetKey, revealSessionId, onSessionRevealed, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, home, t }) {
       const panelActive = usePanelInfo((info) => info.activePanelId !== null);
       const statuses = useSessionStatus((s) => s);
       const rows = React.useMemo(() => deriveFlat(list, sessionIds, rowState, statuses), [list, sessionIds, rowState, statuses]);
@@ -1468,6 +1719,7 @@ window.__ModuleLoader__.load({
           node,
           currentId,
           now,
+          home,
           onOpen: open,
           onRenameRequest: onSessionRenameRequest,
           renderSlot,
@@ -1594,14 +1846,242 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * workspace 重命名/删除对话框（uiw client.js:1799-1939 复刻）。按请求键控挂载
+     * （`${action}/${workspaceId}`，uiw client.js:4152-4159），重名校验走
+     * workspaceRenameReview 纯函数；输入框 IME 防误触 Enter（1887-1898）；
+     * 删除提交后等列表里该 workspace 消失才 settle（1829-1838）。
+     */
+    function WorkspaceDialogs({ request, workspaces, renameWorkspace, deleteWorkspace, settleWorkspaceAction, t }) {
+      const composingRef = React.useRef(false);
+      const renameTarget = request.action === 'rename' ? request : null;
+      const [renameDraft, setRenameDraft] = React.useState(request.displayTitle);
+      const [renaming, setRenaming] = React.useState(false);
+      const [renameError, setRenameError] = React.useState(null);
+      const review = workspaceRenameReview(renameDraft, renameTarget, workspaces, renaming);
+      const closeRename = () => {
+        if (renaming) return;
+        settleWorkspaceAction();
+        setRenameError(null);
+      };
+      const confirmRename = () => {
+        if (review.blocked) return;
+        setRenaming(true);
+        setRenameError(null);
+        renameWorkspace(renameTarget.workspaceId, review.trimmed).then(() => {
+          setRenaming(false);
+          settleWorkspaceAction();
+        }).catch((reason) => {
+          setRenaming(false);
+          setRenameError(reason instanceof Error ? reason.message : String(reason));
+        });
+      };
+      const deleteTarget = request.action === 'delete' ? request : null;
+      const [deleting, setDeleting] = React.useState(false);
+      const [deleteCommittedId, setDeleteCommittedId] = React.useState(null);
+      const [deleteError, setDeleteError] = React.useState(null);
+      React.useEffect(() => {
+        if (deleteCommittedId === null || workspaces.some((workspace) => workspace.workspaceId === deleteCommittedId)) return;
+        setDeleting(false);
+        setDeleteCommittedId(null);
+        settleWorkspaceAction();
+      }, [deleteCommittedId, workspaces, settleWorkspaceAction]);
+      const closeDelete = () => {
+        if (deleting) return;
+        settleWorkspaceAction();
+        setDeleteError(null);
+      };
+      const confirmDelete = () => {
+        if (deleting || deleteTarget === null) return;
+        setDeleting(true);
+        setDeleteCommittedId(null);
+        setDeleteError(null);
+        deleteWorkspace(deleteTarget.workspaceId).then(() => {
+          setDeleteCommittedId(deleteTarget.workspaceId);
+        }).catch((reason) => {
+          setDeleting(false);
+          setDeleteError(reason instanceof Error ? reason.message : String(reason));
+        });
+      };
+      return React.createElement(React.Fragment, null,
+        React.createElement(P.Modal, {
+          open: renameTarget !== null,
+          onClose: closeRename,
+          closeLabel: t('close'),
+          title: t('rename.workspace.title'),
+          footer: React.createElement(React.Fragment, null,
+            React.createElement(P.Button, { variant: 'outline', disabled: renaming, onClick: closeRename }, t('cancel')),
+            React.createElement(P.Button, { variant: 'primary', disabled: review.blocked, onClick: confirmRename }, t('rename'))),
+          children: [
+            React.createElement('input', {
+              key: 'input',
+              className: WB.renameInput,
+              value: renameDraft,
+              'aria-label': t('field.workspaceName'),
+              'data-modal-autofocus': true,
+              disabled: renaming,
+              onFocus: (e) => { e.target.select(); },
+              onChange: (e) => { setRenameDraft(e.target.value); setRenameError(null); },
+              onCompositionStart: () => { composingRef.current = true; },
+              onCompositionEnd: () => { composingRef.current = false; },
+              onKeyDown: (e) => {
+                if (e.key === 'Enter' && !composingRef.current) {
+                  e.preventDefault();
+                  confirmRename();
+                }
+              },
+            }),
+            review.duplicate && React.createElement('div', { key: 'duplicate', className: WB.renameError, role: 'alert' }, t('conflict.named', { name: review.trimmed })),
+            renameError !== null && React.createElement('div', { key: 'error', className: WB.renameError, role: 'alert' }, renameError),
+          ],
+        }),
+        React.createElement(P.Modal, {
+          open: deleteTarget !== null,
+          onClose: closeDelete,
+          closeLabel: t('close'),
+          title: t('delete.workspace'),
+          ...(deleteTarget === null ? {} : { description: t('delete.desc', { name: deleteTarget.displayTitle }) }),
+          footer: React.createElement(React.Fragment, null,
+            React.createElement(P.Button, { variant: 'outline', disabled: deleting, onClick: closeDelete }, t('cancel')),
+            React.createElement(P.Button, { variant: 'outline', className: WB.deleteAction, disabled: deleting, onClick: confirmDelete }, t('delete.workspace'))),
+          children: [
+            deleting && React.createElement('div', { key: 'pending', className: WB.deleteStatus, role: 'status' }, t('delete.pending')),
+            deleteError !== null && React.createElement('div', { key: 'error', className: WB.renameError, role: 'alert' }, deleteError),
+          ],
+        }),
+      );
+    }
+
+    /** 添加工作区菜单的伪 id（uiw client.js:2734）。 */
+    const ADD_WORKSPACE = '::add-workspace';
+
+    /**
+     * 添加工作区的 PickFlow：工作区菜单（同名消歧后缀）+「添加工作区…」入口 +
+     * 目录流洞（`sidebar.workspaces.directoryFlow` 的 owner share）+ 采纳失败错误模态
+     * （uiw client.js:2740-2900 复刻）。状态机 = createPickFlowMachine（可测纯逻辑）。
+     */
+    function WorkspacePickFlow({ t, open, anchorRef, useWorkspaces, createWorkspace, useDirectoryFlow, renderDirectoryFlow, onPick, onClose, addOnly = false, onBusyChange, side = 'bottom', selectedId }) {
+      const workspaceSnapshot = useWorkspaces((state) => state);
+      const workspaces = workspaceSnapshot.items;
+      const getAnchorRect = React.useCallback(() => anchorRef?.current?.getBoundingClientRect() ?? null, [anchorRef]);
+      const machine = createPickFlowMachine();
+      const [flow, setFlow] = React.useState(machine.initial);
+      const flowRef = React.useRef(flow);
+      flowRef.current = flow;
+      const dispatch = (event) => {
+        const next = machine.reduce(flowRef.current, event);
+        flowRef.current = next.state;
+        setFlow(next.state);
+        for (const effect of next.effects) {
+          if (effect.type === 'close') onClose();
+          else if (effect.type === 'pick') onPick(effect.workspaceId);
+        }
+      };
+      const flowBusy = machine.flowBusy(flow);
+      React.useEffect(() => { onBusyChange?.(flowBusy); }, [flowBusy, onBusyChange]);
+      const flowAvailable = useDirectoryFlow((occupied) => occupied);
+      React.useEffect(() => {
+        if (flow.flowOpen && !flowAvailable) dispatch({ type: 'flowUnavailable' });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [flow.flowOpen, flowAvailable]);
+      const adopt = (path) => {
+        createWorkspace({ path }).then((workspace) => {
+          dispatch({ type: 'adoptSucceeded', workspaceId: workspace.workspaceId });
+        }).catch((reason) => {
+          dispatch({ type: 'adoptFailed', message: reason instanceof Error ? reason.message : String(reason) });
+        });
+      };
+      const addEntries = flowAvailable ? [{
+        id: ADD_WORKSPACE,
+        label: t('menu.addWorkspace'),
+        icon: React.createElement(P.IconPlusOutlineRegular, { size: 16 }),
+        disabled: flowBusy,
+      }] : [];
+      const pinAdd = !addOnly && workspaces.length > 0;
+      const defaultWorkspaceName = t('workspace.defaultName');
+      const listed = React.useMemo(() => {
+        if (!pinAdd) return [];
+        const rows = workspaces.map((workspace) => ({
+          id: workspace.workspaceId,
+          title: workspaceDisplayTitle(workspace.title, defaultWorkspaceName),
+          path: workspace.path,
+        }));
+        const suffixes = distinguishingPathSuffixes(rows);
+        return rows.map((row) => ({ ...row, suffix: suffixes.get(row.id) }));
+      }, [pinAdd, workspaces, defaultWorkspaceName]);
+      const items = pinAdd ? listed.map(({ id, title, path, suffix }) => ({
+        id,
+        label: suffix === undefined ? title : React.createElement('span', {
+          className: WP.disambiguated,
+          title: path,
+        }, React.createElement('span', { className: WP.title }, title), ' ', React.createElement('span', { className: WP.pathSuffix }, suffix)),
+        icon: React.createElement(P.IconFolderCloseRegular, { size: 16 }),
+        disabled: flowBusy,
+      })) : addEntries;
+      const menuIsEmpty = items.length === 0;
+      const listSettled = addOnly || workspaceSnapshot.phase === 'ready';
+      const addIsTheOnlyEntry = !pinAdd && listSettled && addEntries.length === 1;
+      React.useEffect(() => {
+        if (machine.autoOpenShouldFire({ open, addIsTheOnlyEntry, flowBusy })) dispatch({ type: 'openFlow' });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [open, addIsTheOnlyEntry, flowBusy]);
+      const handleSelect = (id) => {
+        if (id === ADD_WORKSPACE) {
+          dispatch({ type: 'selectAdd' });
+          return;
+        }
+        onPick(id);
+      };
+      return React.createElement(React.Fragment, null,
+        React.createElement(P.Menu, {
+          open: open && !addIsTheOnlyEntry && !menuIsEmpty,
+          anchor: null,
+          items,
+          ...(pinAdd ? { footer: addEntries } : {}),
+          selectedId,
+          onSelect: handleSelect,
+          onClose,
+          side,
+          portal: true,
+          getAnchorRect,
+        }),
+        open && !addIsTheOnlyEntry && !menuIsEmpty && workspaceSnapshot.phase === 'pending' && React.createElement('div', {
+          className: WP.menuStatus,
+          role: 'status',
+        }, t('picker.loading')),
+        renderDirectoryFlow({
+          open: flow.flowOpen,
+          busy: flow.pickingFolder,
+          onPicked: (path) => {
+            dispatch({ type: 'pickSubmitted' });
+            adopt(path);
+          },
+          onCancel: () => { dispatch({ type: 'flowCancel' }); },
+          onError: (message) => { dispatch({ type: 'flowError', message }); },
+        }),
+        React.createElement(P.Modal, {
+          open: flow.errorOpen,
+          onClose: () => { dispatch({ type: 'errorDismiss' }); },
+          closeLabel: t('close'),
+          title: t('folderError.title'),
+          footer: React.createElement(React.Fragment, null,
+            React.createElement(P.Button, { variant: 'outline', className: WP.modalAction, onClick: () => { dispatch({ type: 'errorDismiss' }); } }, t('cancel')),
+            React.createElement(P.Button, { variant: 'primary', className: WP.modalAction, disabled: !flowAvailable, onClick: () => { dispatch({ type: 'openFlow' }); } }, t('folderError.retry'))),
+          children: React.createElement('div', { className: WP.modalError, role: 'alert' }, flow.modalError),
+        }),
+      );
+    }
+
+    /**
      * 浏览区本体（uiw client.js:3663-4162 的 shadow 复刻）。
-     * T1 差异：无添加工作区按钮与 WorkspacePickFlow（T2）、无 WorkspaceDialogs（T2）。
+     * T2 增量：添加工作区按钮 + WorkspacePickFlow（4043-4061）、WorkspaceDialogs 挂载
+     * （4152-4159）、目录流可用性经 useDirectoryFlow（hooks.directoryFlow）。
      * 搜索快捷键信号读共享的 workspaceShortcuts store（对内置 controls 的探测，见 apply）。
      */
-    function WorkspaceBrowserShadow({ wide, usePanelInfo, expandSidebar, useSessions, useSessionStatus, useRemoteAccess, useSessionAccess, useWorkspaceAccess, useWorkspaces, useStore, actions, startSession, open, requestSessionRename, notifyArchivedNotOpenable, renameWorkspace, useWorkspaceActionRequest, settleWorkspaceAction, deleteWorkspace, insertWorkspaceBefore, unarchiveSession, searchSessions, searchResultLimit, useHostInfo, useShortcuts, useWorkspaceShortcuts, requestSearch, closeAddWorkspace, renderSlot, openSessionMenu, openWorkspaceMenu, useContextMenuTarget, useContextMenu, t }) {
+    function WorkspaceBrowserShadow({ wide, usePanelInfo, expandSidebar, useSessions, useSessionStatus, useRemoteAccess, useSessionAccess, useWorkspaceAccess, useWorkspaces, useStore, actions, startSession, open, requestSessionRename, notifyArchivedNotOpenable, renameWorkspace, useWorkspaceActionRequest, settleWorkspaceAction, deleteWorkspace, insertWorkspaceBefore, unarchiveSession, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostInfo, useShortcuts, useWorkspaceShortcuts, requestSearch, requestAddWorkspace, closeAddWorkspace, setDirectoryBusy, renderSlot, openSessionMenu, openWorkspaceMenu, useContextMenuTarget, useContextMenu, t }) {
       const home = useHostInfo((info) => info.home);
       const shortcuts = useShortcuts((rows) => rows);
       const searchShortcut = shortcuts.find((row) => row.id === 'session.search');
+      const addShortcut = shortcuts.find((row) => row.id === 'workspace.add');
       const shortcutState = useWorkspaceShortcuts((state) => state);
       const list = useSessions((state) => state);
       const storedWorkspaces = useWorkspaces((state) => state.items);
@@ -1614,6 +2094,7 @@ window.__ModuleLoader__.load({
       const workspaceStreamState = useWorkspaces((state) => state.state);
       const archivedSessionIds = useWorkspaces((state) => state.archivedSessionIds);
       const pinnedSessionIds = useWorkspaces((state) => state.pinnedSessionIds);
+      const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied);
       const groupBy = useStore((s) => s.groupBy);
       const orderBy = useStore((s) => s.orderBy);
       const archivedFilter = useStore((s) => s.archivedFilter ?? 'default');
@@ -1721,6 +2202,8 @@ window.__ModuleLoader__.load({
       const [remoteSearch, setRemoteSearch] = React.useState({ query: '', status: 'idle', items: [], hasMore: false });
       const searchRoot = React.useRef(null);
       const searchInput = React.useRef(null);
+      const wsPickerOpen = shortcutState.addRequested;
+      const wsPlusRef = React.useRef(null);
       const workspaceActionRequest = useWorkspaceActionRequest((value) => value);
       const openSearchResult = (sessionId) => {
         if (archivedSessionIds.includes(sessionId)) {
@@ -1863,15 +2346,53 @@ window.__ModuleLoader__.load({
       headerChildren.push(React.createElement('div', {
         key: 'actions',
         className: clsx(WB.headerActions, wide && searchExpanded && WB.headerActionsHidden),
-      }, wide && React.createElement(ViewOptionsMenu, {
-        groupBy,
-        orderBy,
-        archivedFilter,
-        onGroupPick: actions.setGroupBy,
-        onOrderPick: (mode) => { actions.setOrderBy(mode, activeSessionOrders); },
-        onArchivedFilterPick: actions.setArchivedFilter,
+      },
+        wide && React.createElement(ViewOptionsMenu, {
+          groupBy,
+          orderBy,
+          archivedFilter,
+          onGroupPick: actions.setGroupBy,
+          onOrderPick: (mode) => { actions.setOrderBy(mode, activeSessionOrders); },
+          onArchivedFilterPick: actions.setArchivedFilter,
+          t,
+        }),
+        // 添加工作区按钮：仅目录流占位在位时渲染（uiw client.js:4024-4041；rail 态也显示，尺寸 18）。
+        directoryFlowAvailable && React.createElement(P.Tooltip, {
+          label: t('workspace.add'),
+          shortcutKeys: addShortcut?.keys,
+          side: 'bottom',
+          delayMs: 500,
+          portal: true,
+        }, React.createElement('button', {
+          ref: wsPlusRef,
+          type: 'button',
+          className: WB.iconButton,
+          'aria-label': t('workspace.add'),
+          'aria-keyshortcuts': addShortcut?.aria,
+          onClick: () => { requestAddWorkspace(); },
+        }, React.createElement(P.IconProjectAddOutlineRegular, { size: wide ? 16 : 18 })))));
+      // 添加工作区 PickFlow：锚在 + 按钮上，目录流经子座位洞透传 owner share
+      // （uiw client.js:4043-4061；采纳成功后 startSession 接管新 workspace 的首会话）。
+      headerChildren.push(React.createElement(WorkspacePickFlow, {
+        key: 'pickFlow',
         t,
-      })));
+        open: wsPickerOpen,
+        anchorRef: wsPlusRef,
+        useWorkspaces,
+        createWorkspace,
+        useDirectoryFlow,
+        renderDirectoryFlow: (owner) => renderSlot('sidebar.workspaces.directoryFlow', owner),
+        addOnly: true,
+        onBusyChange: setDirectoryBusy,
+        side: 'right',
+        onPick: (workspaceId) => {
+          closeAddWorkspace();
+          startSession(workspaceId, { clearPreviousDraft: false });
+        },
+        onClose: () => {
+          closeAddWorkspace();
+        },
+      }));
       const listChildren = [];
       if (wide) {
         if (normalizedQuery !== '') {
@@ -1897,6 +2418,7 @@ window.__ModuleLoader__.load({
             useSessionAccess,
             usePanelInfo,
             list,
+            home,
             sessionIds: orderedFlatSessionIds,
             rowState,
             onLeaveArchivedOnly: leaveArchivedOnly,
@@ -1922,6 +2444,7 @@ window.__ModuleLoader__.load({
             useWorkspaceAccess,
             usePanelInfo,
             list,
+            home,
             shortcuts,
             useSessionStatus,
             onSessionRenameRequest: requestSessionRename,
@@ -1967,6 +2490,17 @@ window.__ModuleLoader__.load({
             onClick: () => { requestSearch(); },
           }, React.createElement(P.IconSearchOutlineRegular, { size: 18 })))),
         React.createElement('div', { key: 'listArea', className: WB.listArea }, listChildren),
+        // workspace 重命名/删除对话框：按请求键控挂载，请求来自共享的 workspaceActionRequest
+        // store（内置 workspace 菜单项置入，本组件经探测读同一 store，uiw client.js:4152-4159）。
+        workspaceActionRequest !== null && React.createElement(WorkspaceDialogs, {
+          key: workspaceActionRequest.action + '/' + workspaceActionRequest.workspaceId,
+          request: workspaceActionRequest,
+          workspaces,
+          renameWorkspace,
+          deleteWorkspace,
+          settleWorkspaceAction,
+          t,
+        }),
       ];
       return React.createElement('div', { className: clsx(WB.root, !wide && WB.rail) }, rootChildren);
     }
@@ -2027,7 +2561,7 @@ window.__ModuleLoader__.load({
 
     /** 内置 browserInjected 的对应物（uiw client.js:5983-6044）。 */
     function createBrowserInjected(ctx, deps, shared) {
-      const { sessions, workspaces, uiWorkspace, myWorkspaceActionRequest } = deps;
+      const { sessions, workspaces, uiWorkspace, myWorkspaceActionRequest, inertShortcutState } = deps;
       const searchSessions = async (query, signal) => {
         const result = await sessions.search(query, signal);
         if (!result.ok) throw new Error(result.error.message);
@@ -2044,6 +2578,10 @@ window.__ModuleLoader__.load({
         const snapshot = state.getSnapshot();
         state.set({ ...snapshot, searchRequest: snapshot.searchRequest + 1 });
       };
+      // workspace.add 请求通道：优先写共享（内置 controls）store，探测失败写本地 inert store
+      // （补丁语义 = uiw client.js:54-71；directoryBusy 时 add 是 no-op）。
+      const shortcutStore = () => shared.workspaceShortcuts ?? inertShortcutState;
+      const patchShortcuts = (makePatch) => { applyShortcutPatch(shortcutStore(), makePatch(shortcutStore().getSnapshot())); };
       return () => ({
         openWorkspaceMenu: (workspaceId, path, displayTitle, point, mode) => {
           const target = ctx.contextMenus.active.getSnapshot();
@@ -2066,10 +2604,11 @@ window.__ModuleLoader__.load({
         deleteWorkspace: async (workspaceId) => { await workspaces.delete(workspaceId); },
         insertWorkspaceBefore: async (workspaceId, beforeWorkspaceId) => { await workspaces.insertBefore(workspaceId, beforeWorkspaceId); },
         unarchiveSession: async (sessionId) => { await uiWorkspace.unarchiveSession(sessionId); },
+        createWorkspace: (input) => workspaces.create(input),
         requestSearch: bumpSearchRequest,
-        requestAddWorkspace: () => {},
-        closeAddWorkspace: () => {},
-        setDirectoryBusy: () => {},
+        requestAddWorkspace: () => { patchShortcuts((snapshot) => shortcutPatchForAdd(snapshot)); },
+        closeAddWorkspace: () => { patchShortcuts(() => shortcutPatchForCloseAdd()); },
+        setDirectoryBusy: (busy) => { patchShortcuts(() => shortcutPatchForDirectoryBusy(busy)); },
         hooks: {
           workspaceActionRequest: shared.workspaceActionRequest ?? myWorkspaceActionRequest,
           contextMenuTarget: ctx.contextMenus.active,
@@ -2078,7 +2617,7 @@ window.__ModuleLoader__.load({
             getSnapshot: () => ctx.remote.$host,
             subscribe: (listener) => ctx.on('connection/reset', listener),
           },
-          workspaceShortcuts: shared.workspaceShortcuts ?? deps.inertShortcutState,
+          workspaceShortcuts: shared.workspaceShortcuts ?? inertShortcutState,
           shortcuts: ctx.shortcuts.catalog,
         },
       });
@@ -2120,6 +2659,20 @@ window.__ModuleLoader__.load({
       'toast.archivedNotOpenable': '已归档对话暂时无法查看，请取消归档后查看',
       'menu.unarchiveSession': '取消归档',
       'actions.unarchive': '取消归档',
+      'workspace.add': '添加工作区',
+      'menu.addWorkspace': '添加工作区…',
+      'picker.loading': '正在加载工作区…',
+      'folderError.title': '无法打开文件夹',
+      'folderError.retry': '重新选择',
+      'rename': '重命名',
+      'rename.workspace.title': '重命名工作区',
+      'field.workspaceName': '工作区名称',
+      'conflict.named': '已存在名为“{name}”的工作区。',
+      'delete.workspace': '删除工作区',
+      'delete.desc': '将把“{name}”从工作区列表中移除。文件夹与会话记录会保留，其会话将显示在“未分组”下。',
+      'delete.pending': '正在删除工作区…',
+      'close': '关闭',
+      'cancel': '取消',
       'actions.workspace.aria': '工作区“{name}”的操作',
       'actions.session.aria': '会话“{name}”的操作',
       'actions.newSession': '新会话',
@@ -2144,6 +2697,7 @@ window.__ModuleLoader__.load({
       'time.months': '{n}个月',
       'time.years': '{n}年',
       'time.ago': '{t}前',
+      'hover.created': '创建于 {time}',
       'menu.editTags': '编辑标签',
       'tags.title': '「{name}」的标签',
       'tags.inputPlaceholder': '新标签，回车即建即挂',
@@ -2192,6 +2746,20 @@ window.__ModuleLoader__.load({
       'toast.archivedNotOpenable': 'Archived sessions cannot be opened. Unarchive it to view.',
       'menu.unarchiveSession': 'Unarchive session',
       'actions.unarchive': 'Unarchive',
+      'workspace.add': 'Add workspace',
+      'menu.addWorkspace': 'Add workspace…',
+      'picker.loading': 'Loading workspaces…',
+      'folderError.title': 'Couldn’t open folder',
+      'folderError.retry': 'Choose again',
+      'rename': 'Rename',
+      'rename.workspace.title': 'Rename workspace',
+      'field.workspaceName': 'Workspace name',
+      'conflict.named': 'A workspace named “{name}” already exists.',
+      'delete.workspace': 'Delete workspace',
+      'delete.desc': 'This removes “{name}” from the workspace list. The folder and session logs will be kept. Its sessions will appear under Ungrouped.',
+      'delete.pending': 'Deleting workspace…',
+      'close': 'Close',
+      'cancel': 'Cancel',
       'actions.workspace.aria': 'Workspace actions for {name}',
       'actions.session.aria': 'Session actions for {name}',
       'actions.newSession': 'New session',
@@ -2216,6 +2784,7 @@ window.__ModuleLoader__.load({
       'time.months': '{n}mo',
       'time.years': '{n}y',
       'time.ago': '{t} ago',
+      'hover.created': 'Created {time}',
       'menu.editTags': 'Edit tags',
       'tags.title': 'Tags for “{name}”',
       'tags.inputPlaceholder': 'New tag — Enter creates and attaches',
@@ -2447,9 +3016,20 @@ window.__ModuleLoader__.load({
         const t = ctx.locale.bind(NS);
 
         // 视图状态：与内置同 persist 键（禁用回退时内置无缝接续同一份分组/排序/展开/手动序）。
-        const viewHandle = storeLib.defineStore(workspaceViewStoreSpec());
-        const viewInstance = viewHandle.create();
-        const myViewStore = { ...viewHandle, create: () => viewInstance };
+        // T2：内置在位（先注册）时直接共享其 view store 句柄——归档 toast 的「显示已归档」
+        // （uiw client.js:5912-5914 写内置 viewInstance）、uiWorkspace.pinSession 的本地序
+        // （1551-1558）与本 shadow 的全部视图写落在同一实例，消除双实例漂移；
+        // 内置未在位时回退本地实例（T1 同一降级语义）。
+        const localViewHandle = storeLib.defineStore(workspaceViewStoreSpec());
+        const localViewInstance = localViewHandle.create();
+        let sharedViewStore = null;
+        try {
+          sharedViewStore = pickSharedViewStore(ctx.slots.entries(SLOT_NAME));
+        } catch (error) {
+          console.warn('session-tags: shared view store probe failed:', error);
+        }
+        const viewStore = sharedViewStore ?? { ...localViewHandle, create: () => localViewInstance };
+        if (sharedViewStore === null) console.warn('session-tags: builtin view store not present; using local view store instance (toast archive-filter actions land after reload)');
 
         const inertShortcutState = storeLib.createSnapshotStore({ searchRequest: 0, addRequested: false, directoryBusy: false, renameTarget: null });
         const myWorkspaceActionRequest = storeLib.createSnapshotStore(null);
@@ -2473,7 +3053,7 @@ window.__ModuleLoader__.load({
             'sidebar.session.row.trailing': { kind: 'list', scope: 'root', inline: true },
             'sidebar.session.row.hover': { kind: 'list', scope: 'root' },
           },
-          store: myViewStore,
+          store: viewStore,
           inject: browserInjected,
           locale: NS,
         }, WorkspaceBrowserShadow));
@@ -2584,6 +3164,18 @@ window.__ModuleLoader__.load({
         mainSessionId,
         workspaceLabel,
         workspaceDisplayTitle,
+        distinguishingPathSuffixes,
+        workspaceRenameReview,
+        hoverTimeLabel,
+        createdLabel,
+        hoverStatuses,
+        createPickFlowMachine,
+        shortcutPatchForAdd,
+        shortcutPatchForCloseAdd,
+        shortcutPatchForDirectoryBusy,
+        applyShortcutPatch,
+        isValidViewStoreHandle,
+        pickSharedViewStore,
         orderByRecency,
         reconcileManualOrder,
         pinCurrentBlank,

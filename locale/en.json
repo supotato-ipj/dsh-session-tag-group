@@ -47,6 +47,20 @@
   "tags.list.aria": "Tags",
   "tags.input.aria": "New tag name",
   "actions.unarchive": "Unarchive",
+  "workspace.add": "Add workspace",
+  "menu.addWorkspace": "Add workspace…",
+  "picker.loading": "Loading workspaces…",
+  "folderError.title": "Couldn’t open folder",
+  "folderError.retry": "Choose again",
+  "rename": "Rename",
+  "rename.workspace.title": "Rename workspace",
+  "field.workspaceName": "Workspace name",
+  "conflict.named": "A workspace named “{name}” already exists.",
+  "delete.workspace": "Delete workspace",
+  "delete.desc": "This removes “{name}” from the workspace list. The folder and session logs will be kept. Its sessions will appear under Ungrouped.",
+  "delete.pending": "Deleting workspace…",
+  "close": "Close",
+  "cancel": "Cancel",
   "actions.workspace.aria": "Workspace actions for {name}",
   "actions.session.aria": "Session actions for {name}",
   "actions.newSession": "New session",
@@ -71,5 +85,6 @@
   "time.days": "{n}d",
   "time.months": "{n}mo",
   "time.years": "{n}y",
-  "time.ago": "{t} ago"
+  "time.ago": "{t} ago",
+  "hover.created": "Created {time}"
 }

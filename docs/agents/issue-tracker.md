@@ -4,7 +4,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 ## Status
 
-Connected: `origin` = `https://github.com/supotato-ipj/dsh-pin-session-tag-group.git` (private repo, branch `main`).
+Connected: `origin` = `https://github.com/supotato-ipj/dsh-session-tag-group.git` (private repo, branch `main`).
 All five triage labels from `triage-labels.md` exist on the tracker (`wontfix` is the GitHub default with its stock description; the other four were created 2026-11-07).
 
 ## Conventions

@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-GitHub Issues (repo inferred from `git remote -v`; `supotato-ipj/dsh-pin-session-tag-group`, private). See `docs/agents/issue-tracker.md`.
+GitHub Issues (repo inferred from `git remote -v`; `supotato-ipj/dsh-session-tag-group`, private). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

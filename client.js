@@ -29,11 +29,18 @@
  * 共享 view store 键 dsh.workspace.view.v5）。内置默认三模式行为不变，标签
  * 模式只增量。
  *
- * 子座位保活（07 简报 §1）：本注册原样声明内置的五个 children（directoryFlow / session.row.action /
- * session.row.leading / session.row.trailing / session.row.hover），并以相同 props renderSlot——
- * 内置插件对 row.action（archive/pin 按钮，6099-6114）、contextMenu.content session 菜单（6080-6091）、
- * shell.overlay（重命名/归档确认/行 toast，6115-6137）的注册都是**独立 inject 调用**，不随父座位选举
- * 消失，继续经本 shadow 的 renderSlot 渲染。
+ * 私有子座位（boot 修复，见 ADR-0001 增补）：影子条目**不能**声明内置 WorkspaceBrowser 已认领的
+ * 五个 children（`sidebar.workspaces.directoryFlow` / `sidebar.workspaces.session.row.action` /
+ * `sidebar.session.row.{leading,trailing,hover}`）——slot 注册表对 children 逐个查重，重复声明抛
+ * `slot "..." is already declared`；且 renderSlot 按条目绑定（boundRenderSlot：只允许渲染
+ * `entry.children` 里声明的座位），影子条目渲染内置座位会抛 `SlotOwnershipError: slot '...' is not
+ * declared by this entry's children`（实测两处都会让 client 入口激活/渲染失败 → 桌面端整页启动失败）。
+ * 故本注册声明自己的一套私有座位（SESSION_TAG_SLOTS，kind/scope/inline 与内置逐项对齐），并把
+ * 原先由内置子座位承载的功能复刻给自己：标签色点 / 悬停标签名由本插件注册进私有座位，
+ * archive/pin 行按钮由本插件复刻（动作面优先复用内置注册的 inject 面，见 probeBuiltinRowActions），
+ * 添加工作区的目录流改为私有座位 + `uiWorkspace.pickDirectory()`（原生/browse 选择器由 Host 能力决定），
+ * 不再依赖 `sidebar.workspaces.directoryFlow`。全局注册（contextMenu.content 会话菜单 /
+ * contextMenu.icon / shell.overlay 对话框与行 toast）不受座位选举影响，原样保留。
  *
  * 样式策略：内置插件的样式表在其 client 模块物化时注入（style[data-plugin-css]，uiw client.js:1740-1746、
  * 1957-1963）；shadow 后内置插件仍启用，样式仍在——本文件直接复用同一批编译类名（WB_/RW_ 映射表），
@@ -50,6 +57,25 @@ window.__ModuleLoader__.load({
     const NS = 'session-tags';
     /** shadow 目标槽名。 */
     const SLOT_NAME = 'sidebar.workspaces';
+    /**
+     * 影子自声明、自渲染的私有子座位（文件头「私有子座位」）。kind/scope/inline 与内置
+     * WorkspaceBrowser 的同名 children（uiw client.js:6052-6075）逐项一致：
+     * directoryFlow=single/root，row.action=list/root，leading/trailing=list/root/inline，
+     * hover=list/root。占用者全部由本插件或影子内部供给；内置注册仍挂在原座位名上
+     * （由内置自己的 renderSlot 渲染，影子不再触碰）。
+     */
+    const SESSION_TAG_SLOTS = {
+      directoryFlow: 'session-tags.directoryFlow',
+      rowAction: 'session-tags.session.row.action',
+      rowLeading: 'session-tags.session.row.leading',
+      rowTrailing: 'session-tags.session.row.trailing',
+      rowHover: 'session-tags.session.row.hover',
+    };
+    /**
+     * 内置行尾悬停按钮的座位名：只用于**探测**内置 archive/pin 注册携带的 inject 面
+     * （动作语义 + 归档确认框/行 toast 的接线），本插件从不渲染该座位。
+     */
+    const BUILTIN_ROW_ACTION_SEAT = 'sidebar.workspaces.session.row.action';
     /** Client→Host 标签通道（与 Host 半 index.js 的 TAG_RPC_CHANNEL 同值）。 */
     const TAG_RPC_CHANNEL = '/session-tags';
     /**
@@ -947,7 +973,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 悬停卡扩展段（`sidebar.session.row.hover` 占用者，票 #4 AC 补口）的行拼装：
+     * 悬停卡扩展段（私有 `session-tags.session.row.hover` 占用者，票 #4 AC 补口）的行拼装：
      * 每个标签一行 { name, color }（色与行色点/组头同源 tagColorOf）；无标签 →
      * 空数组（占用者渲染 null，扩展段整体不出现）。与行首色点不同：不收敛数量——
      * 悬停卡有整列空间，全量列出；状态点占用 leading 格导致色点让位时，这里
@@ -1250,7 +1276,7 @@ window.__ModuleLoader__.load({
 
     /**
      * 会话悬停卡内容（uiw client.js:2401-2429）：全标题、cwd 缩略、相对时间
-     * （ago 模板，blank 行没有时间行）、`sidebar.session.row.hover` 扩展段、
+     * （ago 模板，blank 行没有时间行）、私有 hover 座位扩展段、
      * 每状态一行（StateDot+文案；归档行剔除 done/idle 状态）、归档行加归档图标行。
      */
     function SessionHoverContent({ node, cwd, now, renderSlot, t }) {
@@ -1260,7 +1286,7 @@ window.__ModuleLoader__.load({
       ];
       if (cwd !== undefined) children.push(React.createElement('div', { key: 'cwd', className: RW.hoverPath }, cwd));
       if (!node.blank) children.push(React.createElement('div', { key: 'time', className: RW.hoverTime }, hoverTimeLabel(P.relativeTime, node.updatedAt, now, t)));
-      children.push(React.createElement(React.Fragment, { key: 'hover-slot' }, renderSlot('sidebar.session.row.hover', { sessionId: node.id })));
+      children.push(React.createElement(React.Fragment, { key: 'hover-slot' }, renderSlot(SESSION_TAG_SLOTS.rowHover, { sessionId: node.id })));
       for (const status of statuses) {
         children.push(React.createElement('div', { key: status.label, className: RW.hoverStatus },
           React.createElement(P.StateDot, { state: status.state }),
@@ -1457,7 +1483,7 @@ window.__ModuleLoader__.load({
     /**
      * 会话行（uiw client.js:2528-2685）。
      * T1 差异：不包 HoverCard（悬停卡 = T2）；行首/行尾装饰位与「...」菜单、快捷动作列表
-     * （renderSlot('sidebar.workspaces.session.row.action')）原样保留。
+     * （renderSlot(SESSION_TAG_SLOTS.rowAction)）原样保留。
      */
     function SessionNodeItem({ node, currentId, now, onOpen, onRenameRequest, renderSlot, openSessionMenu, useContextMenuTarget, useContextMenu, onReveal, drag, home, useSessionAccess, sourceLabel, t }) {
       const { getTriggerProps } = useContextMenu();
@@ -1531,7 +1557,7 @@ window.__ModuleLoader__.load({
         React.createElement('span', { className: RW.slot },
           !row.archived && !row.blank && (showStatus
             ? React.createElement(SessionStatusDots, { statuses })
-            : renderSlot('sidebar.session.row.leading', { sessionId: node.id }))),
+            : renderSlot(SESSION_TAG_SLOTS.rowLeading, { sessionId: node.id }))),
         React.createElement('span', {
           ref: titleRef,
           className: RW.title,
@@ -1558,7 +1584,7 @@ window.__ModuleLoader__.load({
             className: clsx(RW.time, primaryStatus.trailingLabel === undefined && RW.timestamp),
             'aria-hidden': primaryStatus.trailingLabel === undefined ? undefined : true,
           }, primaryStatus.trailingLabel ?? timeLabel(row.updatedAt, now, t)),
-          renderSlot('sidebar.session.row.trailing', { sessionId: node.id }),
+          renderSlot(SESSION_TAG_SLOTS.rowTrailing, { sessionId: node.id }),
           row.pinned && !row.archived && React.createElement(PinnedIndicator, { t })),
         !row.blank && React.createElement('span', {
           className: RW.rowActions,
@@ -1577,7 +1603,7 @@ window.__ModuleLoader__.load({
             },
           }, React.createElement(P.IconEllipsisOutlineRegular, null)),
           React.createElement('span', { className: RW.rowQuickActions },
-            renderSlot('sidebar.workspaces.session.row.action', { sessionId: node.id, displayTitle: row.title }))),
+            renderSlot(SESSION_TAG_SLOTS.rowAction, { sessionId: node.id, displayTitle: row.title }))),
       );
       // 整行作悬停卡锚点：菜单/拖拽开启时禁用；copy 文本 = 标题（blank/空标题不给，uiw client.js:2557-2684）。
       return React.createElement(P.HoverCard, {
@@ -1596,6 +1622,118 @@ window.__ModuleLoader__.load({
         copyLabel: t('copy'),
         copiedLabel: t('hover.copied'),
       });
+    }
+
+    /**
+     * 派生 observable（与内置 uiw client.js:4299-4320 的 derive 同语义）：源快照换身份时
+     * 才重算投影，消费者（每行一次 Set 查找）不会按读取次数重建。
+     */
+    function derive(source, project) {
+      let seen;
+      let value;
+      return {
+        getSnapshot: () => {
+          const snapshot = source.getSnapshot();
+          if (value === undefined || snapshot !== seen) {
+            seen = snapshot;
+            value = project(snapshot);
+          }
+          return value;
+        },
+        subscribe: (listener) => source.subscribe(listener),
+      };
+    }
+
+    /**
+     * 行尾归档/恢复按钮（私有 rowAction 座位占用者，order 100）。复刻内置
+     * ArchiveSessionRowButton（uiw client.js:4166-4191）：归档集合经 hooks.archived 读、
+     * 动作经 apply 探测/回退（probeBuiltinRowActions）；归档确认框
+     * （shell.overlay `workspace.session-archive`）与行 toast（`workspace.row-toast`）
+     * 由内置的独立注册继续供给，本按钮只负责触发同一份动作面。
+     */
+    function ArchiveSessionRowButton({ sessionId, useArchived, useSessionAccess, archiveSession, unarchiveSession, t }) {
+      const archived = useArchived((set) => set.has(sessionId));
+      const allowed = useSessionAccess(sessionId, archived ? 'workspace/unarchiveSession' : 'workspace/archiveSession');
+      if (!allowed) return null;
+      return React.createElement(P.Tooltip, {
+        label: t(archived ? 'actions.unarchive' : 'actions.archive'),
+        side: 'bottom',
+        align: 'end',
+        delayMs: 500,
+        portal: true,
+      }, React.createElement('button', {
+        type: 'button',
+        className: RW.iconButton,
+        'aria-label': t(archived ? 'menu.unarchiveSession' : 'menu.archiveSession'),
+        onClick: () => { (archived ? unarchiveSession : archiveSession)(sessionId); },
+      }, archived
+        ? React.createElement(P.IconUnarchiveOutlineRegular, { size: 14 })
+        : React.createElement(P.IconArchiveOutlineRegular, { size: 14 })));
+    }
+
+    /**
+     * 行尾置顶/取消置顶按钮（私有 rowAction 座位占用者，order 200）。复刻内置
+     * PinSessionRowButton（uiw client.js:4399-4438）：归档行不显示，置顶态用实心图钉；
+     * pin 的本地序联动在 uiWorkspace.pinSession 内完成（uiw client.js:1551-1557）。
+     */
+    function PinSessionRowButton({ sessionId, useArchived, usePinned, useSessionAccess, pinSession, unpinSession, t }) {
+      const pinned = usePinned((set) => set.has(sessionId));
+      const archived = useArchived((set) => set.has(sessionId));
+      const allowed = useSessionAccess(sessionId, pinned ? 'workspace/unpinSession' : 'workspace/pinSession');
+      if (archived || !allowed) return null;
+      return React.createElement(P.Tooltip, {
+        label: t(pinned ? 'actions.unpin' : 'actions.pin'),
+        side: 'bottom',
+        align: 'end',
+        delayMs: 500,
+        portal: true,
+      }, React.createElement('button', {
+        type: 'button',
+        className: clsx(RW.iconButton, pinned && RW.pinnedAction),
+        'aria-label': t(pinned ? 'menu.unpinSession' : 'menu.pinSession'),
+        onClick: () => { (pinned ? unpinSession : pinSession)(sessionId); },
+      }, pinned
+        ? React.createElement(P.IconPinFillRegular, { size: 14 })
+        : React.createElement(P.IconPinOutlineRegular, { size: 14 })));
+    }
+
+    /**
+     * 目录选择流占用者（私有 directoryFlow 座位，renderless）。与内置 native 选择器
+     * （@deepseek-ai/dsh-client-ui-directory-picker-native lib/client.js:22-51）同形态：
+     * 每次 open 上升沿恰好发起一次 pick、恰好回报一个结果；owner 收回 open 后重新武装。
+     * `pick` 由 apply 注入：桌面预加载桥优先，否则 `uiWorkspace.pickDirectory()`
+     * （Host 端 directory-picker 能力；Windows 为原生对话框，Linux 无 chooser 时由 browse
+     * 提供者承载）。取消 = 解析为 null，失败 = onError（owner 转错误模态）。
+     */
+    function SessionTagDirectoryFlow(props) {
+      const { open, pick } = props;
+      const armed = React.useRef(false);
+      const outcome = React.useRef(props);
+      outcome.current = props;
+      const alive = React.useRef(true);
+      React.useEffect(() => {
+        alive.current = true;
+        return () => {
+          alive.current = false;
+        };
+      }, []);
+      React.useEffect(() => {
+        if (!open) {
+          armed.current = false;
+          return;
+        }
+        if (armed.current) return;
+        armed.current = true;
+        pick().then((path) => {
+          if (!alive.current) return;
+          if (path === null || path === undefined) outcome.current.onCancel();
+          else outcome.current.onPicked(path);
+        }, (reason) => {
+          if (!alive.current) return;
+          outcome.current.onError(reason instanceof Error ? reason.message : String(reason));
+        });
+      }, [open, pick]);
+      return null;
     }
 
     /**
@@ -2163,7 +2301,7 @@ window.__ModuleLoader__.load({
 
     /**
      * 添加工作区的 PickFlow：工作区菜单（同名消歧后缀）+「添加工作区…」入口 +
-     * 目录流洞（`sidebar.workspaces.directoryFlow` 的 owner share）+ 采纳失败错误模态
+     * 目录流洞（私有 `session-tags.directoryFlow` 的 owner share）+ 采纳失败错误模态
      * （uiw client.js:2740-2900 复刻）。状态机 = createPickFlowMachine（可测纯逻辑）。
      */
     function WorkspacePickFlow({ t, open, anchorRef, useWorkspaces, createWorkspace, useDirectoryFlow, renderDirectoryFlow, onPick, onClose, addOnly = false, onBusyChange, side = 'bottom', selectedId }) {
@@ -2603,8 +2741,8 @@ window.__ModuleLoader__.load({
           'aria-keyshortcuts': addShortcut?.aria,
           onClick: () => { requestAddWorkspace(); },
         }, React.createElement(P.IconProjectAddOutlineRegular, { size: wide ? 16 : 18 })))));
-      // 添加工作区 PickFlow：锚在 + 按钮上，目录流经子座位洞透传 owner share
-      // （uiw client.js:4043-4061；采纳成功后 startSession 接管新 workspace 的首会话）。
+      // 目录流：私有座位洞（renderless 占用者每次 open 调用 pickDirectory），不再依赖内置
+      // `sidebar.workspaces.directoryFlow`（影子渲染不了内置子座位）。
       headerChildren.push(React.createElement(WorkspacePickFlow, {
         key: 'pickFlow',
         t,
@@ -2613,7 +2751,7 @@ window.__ModuleLoader__.load({
         useWorkspaces,
         createWorkspace,
         useDirectoryFlow,
-        renderDirectoryFlow: (owner) => renderSlot('sidebar.workspaces.directoryFlow', owner),
+        renderDirectoryFlow: (owner) => renderSlot(SESSION_TAG_SLOTS.directoryFlow, owner),
         addOnly: true,
         onBusyChange: setDirectoryBusy,
         side: 'right',
@@ -2758,7 +2896,7 @@ window.__ModuleLoader__.load({
           t,
         }),
       ];
-      return React.createElement('div', { className: clsx(WB.root, !wide && WB.rail) }, rootChildren);
+      return React.createElement('div', { className: clsx(WB.root, !wide && WB.rail), 'data-session-tags-shadow': '' }, rootChildren);
     }
 
     // =====================================================================
@@ -2815,6 +2953,58 @@ window.__ModuleLoader__.load({
       return shared;
     }
 
+    /**
+     * 内置行尾按钮的动作面探测（私有 rowAction 座位的回退/复用）。
+     *
+     * 内置对 `sidebar.workspaces.session.row.action` 的 archive(100)/pin(200) 两个注册各带
+     * inject 工厂（uiw client.js:6099-6114），其返回面里有完整的 archiveSession
+     * （运行中活动拒绝 → 置 archiveRequest → 内置 shell.overlay 归档确认框；成功 → 行 toast）
+     * 与 pinSession/unpinSession。影子渲染不了内置子座位，但可以复用这份**动作语义**，
+     * 让归档确认框/toast/置顶本地序继续由内置供给，避免在影子行里重造确认流程。
+     * 探测不到（内置尚未注册/已被禁用）时调用方回退到 uiWorkspace 的直接动作。
+     * @returns 找到的动作面（缺项不填）。
+     */
+    function probeBuiltinRowActions(ctx) {
+      const found = {};
+      try {
+        for (const entry of ctx.slots.entries(BUILTIN_ROW_ACTION_SEAT)) {
+          const factory = entry?.options?.inject ?? entry?.inject;
+          if (typeof factory !== 'function') continue;
+          let face;
+          try {
+            face = factory();
+          } catch {
+            continue;
+          }
+          if (face === null || typeof face !== 'object') continue;
+          if (found.archiveSession === undefined && typeof face.archiveSession === 'function' && typeof face.unarchiveSession === 'function') {
+            found.archiveSession = face.archiveSession;
+            found.unarchiveSession = face.unarchiveSession;
+          }
+          if (found.pinSession === undefined && typeof face.pinSession === 'function' && typeof face.unpinSession === 'function') {
+            found.pinSession = face.pinSession;
+            found.unpinSession = face.unpinSession;
+          }
+        }
+      } catch (error) {
+        console.warn('session-tags: builtin row-action probe failed:', error);
+      }
+      return found;
+    }
+
+    /** 行尾动作的回退面：直接调 uiWorkspace（失败只记录，不冒泡成未捕获异常）。 */
+    function fallbackRowActions(uiWorkspace) {
+      const reject = (label) => (reason) => {
+        console.warn('session-tags: ' + label + ' rejected:', reason);
+      };
+      return {
+        archiveSession: (sessionId) => { uiWorkspace.archiveSession(sessionId).catch(reject('session archive')); },
+        unarchiveSession: (sessionId) => { uiWorkspace.unarchiveSession(sessionId).catch(reject('session unarchive')); },
+        pinSession: (sessionId) => { uiWorkspace.pinSession(sessionId).catch(reject('session pin')); },
+        unpinSession: (sessionId) => { uiWorkspace.unpinSession(sessionId).catch(reject('session unpin')); },
+      };
+    }
+
     /** 内置 browserInjected 的对应物（uiw client.js:5983-6044）。 */
     function createBrowserInjected(ctx, deps, shared) {
       const { sessions, workspaces, uiWorkspace, myWorkspaceActionRequest, inertShortcutState } = deps;
@@ -2868,7 +3058,7 @@ window.__ModuleLoader__.load({
         hooks: {
           workspaceActionRequest: shared.workspaceActionRequest ?? myWorkspaceActionRequest,
           contextMenuTarget: ctx.contextMenus.active,
-          directoryFlow: flowSource('sidebar.workspaces.directoryFlow'),
+          directoryFlow: flowSource(SESSION_TAG_SLOTS.directoryFlow),
           hostInfo: {
             getSnapshot: () => ctx.remote.$host,
             subscribe: (listener) => ctx.on('connection/reset', listener),
@@ -2916,8 +3106,14 @@ window.__ModuleLoader__.load({
       'row.archived': '已归档',
       'row.pinned': '已置顶',
       'toast.archivedNotOpenable': '已归档对话暂时无法查看，请取消归档后查看',
+      'menu.archiveSession': '归档会话',
       'menu.unarchiveSession': '取消归档',
+      'menu.pinSession': '置顶会话',
+      'menu.unpinSession': '取消置顶',
+      'actions.archive': '归档会话',
       'actions.unarchive': '取消归档',
+      'actions.pin': '置顶会话',
+      'actions.unpin': '取消置顶',
       'workspace.add': '添加工作区',
       'menu.addWorkspace': '添加工作区…',
       'picker.loading': '正在加载工作区…',
@@ -3006,8 +3202,14 @@ window.__ModuleLoader__.load({
       'row.archived': 'Archived',
       'row.pinned': 'Pinned',
       'toast.archivedNotOpenable': 'Archived sessions cannot be opened. Unarchive it to view.',
+      'menu.archiveSession': 'Archive session',
       'menu.unarchiveSession': 'Unarchive session',
+      'menu.pinSession': 'Pin session',
+      'menu.unpinSession': 'Unpin session',
+      'actions.archive': 'Archive',
       'actions.unarchive': 'Unarchive',
+      'actions.pin': 'Pin',
+      'actions.unpin': 'Unpin',
       'workspace.add': 'Add workspace',
       'menu.addWorkspace': 'Add workspace…',
       'picker.loading': 'Loading workspaces…',
@@ -3101,7 +3303,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 行首标签色点（`sidebar.session.row.leading` 占用者）。
+     * 行首标签色点（私有 `session-tags.session.row.leading` 占用者）。
      * 优先级取舍：内置状态点占用同一 16px 格时，T1 渲染层根本不调 renderSlot
      * （SessionNodeItem 的 showStatus 分支）——色点整体让位；且状态点的语义
      * 优先级本来更高（00 笔记 §4）。收敛：最多 3 点，点径随数量收缩，全量
@@ -3125,7 +3327,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 悬停卡扩展段（`sidebar.session.row.hover` 占用者，票 #4 AC 补口）：
+     * 悬停卡扩展段（私有 `session-tags.session.row.hover` 占用者，票 #4 AC 补口）：
      * 每标签一行（SessionHoverContent 既有 hoverStatus 行形态，类名映射复用：
      * 色点 + 名字）。无标签渲染 null——扩展段整体不出现；数据只读 tagsStore
      * 镜像（listAll 首屏 + 变更响应回填，即 10 号笔记 §2 的 listSessionTags/
@@ -3340,7 +3542,7 @@ window.__ModuleLoader__.load({
       const groups = React.useMemo(() => deriveTagGroups(list, workspaces, rowState, statuses, snapshot, { isExpanded, matchIds }), [list, workspaces, rowState, statuses, snapshot, isExpanded, matchIds]);
       const baselines = new Map(groups.map((group) => [group.key, Math.max(SESSION_WATERMARK_BASE, requiredWatermark(group.sessions, current, undefined))]));
       // D1：水位线簇与 SessionTree 共用 useWatermarks（此处基线 = 全量组，无折叠祖先过滤）。
-      const { sessionWatermarks, overflowToggle, watermarkMotionKey } = useWatermarks(baselines);
+      const { sessionWatermarks, dropWatermarks, overflowToggle, watermarkMotionKey } = useWatermarks(baselines);
       const now = Date.now();
       const rowKeys = [];
       const groupRows = [];
@@ -3416,6 +3618,7 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale', 'sessions', 'workspaces', 'uiWorkspace', 'contextMenus', 'remote', 'remoteAccess', 'shortcuts', 'connection'],
       apply(ctx) {
+        try {
         React = require('react');
         P = require('@deepseek-ai/dsh-client-ui-primitives');
         storeLib = require('@deepseek-ai/dsh-client-store');
@@ -3452,22 +3655,60 @@ window.__ModuleLoader__.load({
 
         const browserInjected = createBrowserInjected(ctx, { sessions, workspaces, uiWorkspace, myWorkspaceActionRequest, inertShortcutState }, shared);
 
-        // shadow 注册：children 原样声明内置五座位（uiw client.js:6052-6075），
-        // 行动作按钮/右键菜单/shell.overlay 对话框由内置的独立注册继续供给。
+        /**
+         * 目录挑选（私有 directoryFlow 座位的 pick 注入）：桌面预加载桥优先
+         * （形态同 @deepseek-ai/dsh-client-ui-directory-picker-native），否则走
+         * uiWorkspace.pickDirectory()（Host directory-picker 能力：Windows 原生对话框，
+         * Linux 无 chooser 时由 browse 提供者承载）。解析为 path|null；失败抛错，
+         * 由 SessionTagDirectoryFlow 转 owner.onError → 错误模态。
+         */
+        const pickDirectory = async () => {
+          const native = globalThis.__DSH_DIRECTORY_PICKER__;
+          if (native !== undefined && typeof native.pick === 'function') {
+            const picked = await native.pick();
+            return picked === undefined ? null : picked;
+          }
+          return uiWorkspace.pickDirectory();
+        };
+
+        // 行尾按钮的成员集合（与内置 pinnedSet/archivedSet 同语义，uiw client.js:5814-5815）。
+        const pinnedSet = derive(workspaces.list, (snapshot) => new Set(snapshot.pinnedSessionIds));
+        const archivedSet = derive(workspaces.list, (snapshot) => new Set(snapshot.archivedSessionIds));
+        /**
+         * 行尾动作面：优先复用内置 archive/pin 注册的 inject（确认框/toast/置顶本地序都在
+         * 内置侧），缺项回退 uiWorkspace 直接调用。inject 工厂在条目首次渲染时求值一次，
+         * 届时内置早已注册完成（本探测不承担装载顺序保证，探测不到就走回退）。
+         */
+        const rowActionInjected = () => ({
+          ...fallbackRowActions(uiWorkspace),
+          ...probeBuiltinRowActions(ctx),
+          hooks: { archived: archivedSet, pinned: pinnedSet },
+        });
+
+        // shadow 注册：只在 entry.children 里声明**本插件私有**的五个子座位
+        // （不能用内置座位名——重复声明会被 slot 注册表拒绝，且 renderSlot 按条目绑定；
+        // 见文件头「私有子座位」）。占用者由本插件注册，见下方各 inject。
         ctx.slots.inject(SLOT_NAME, () => ctx.slots.register({
           name: SLOT_NAME,
           priority: SHADOW_PRIORITY,
           children: {
-            'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
-            'sidebar.workspaces.session.row.action': { kind: 'list', scope: 'root' },
-            'sidebar.session.row.leading': { kind: 'list', scope: 'root', inline: true },
-            'sidebar.session.row.trailing': { kind: 'list', scope: 'root', inline: true },
-            'sidebar.session.row.hover': { kind: 'list', scope: 'root' },
+            [SESSION_TAG_SLOTS.directoryFlow]: { kind: 'single', scope: 'root' },
+            [SESSION_TAG_SLOTS.rowAction]: { kind: 'list', scope: 'root' },
+            [SESSION_TAG_SLOTS.rowLeading]: { kind: 'list', scope: 'root', inline: true },
+            [SESSION_TAG_SLOTS.rowTrailing]: { kind: 'list', scope: 'root', inline: true },
+            [SESSION_TAG_SLOTS.rowHover]: { kind: 'list', scope: 'root' },
           },
           store: viewStore,
           inject: browserInjected,
           locale: NS,
         }, WorkspaceBrowserShadow));
+
+        // 私有目录流座位：renderless 占用者，每次 open 上升沿调用一次 pickDirectory，
+        // 恰好回报一个结果（取消=null / 成功=path / 失败=错误模态）。
+        ctx.slots.inject(SESSION_TAG_SLOTS.directoryFlow, () => ctx.slots.register({
+          name: SESSION_TAG_SLOTS.directoryFlow,
+          inject: () => ({ pick: pickDirectory }),
+        }, SessionTagDirectoryFlow));
 
         // -------------------------------------------------------------------
         // 标签数据面（票 #4）：/session-tags RPC 通道 + 本地镜像 store。
@@ -3521,22 +3762,62 @@ window.__ModuleLoader__.load({
           },
         };
 
-        // 行首标签色点（shadow 自己声明的 inline 子座位；状态点占用时 T1 渲染层
-        // 不调本座位 → 色点让位，取舍见 SessionTagDots 注释）。
-        ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({
-          name: 'sidebar.session.row.leading',
+        /**
+         * 「稍后重试」降级：页面激活可能早于 Host 半 storage domain 就绪（冷启动时序），
+         * 修复前 `ctx.effect` 误用还会让 domain 一直处于 closed。首屏镜像与模式恢复都
+         * 不是阻塞 UI 的关键路径——重试 3 次（400/800ms 退避）后放弃并返回 undefined，
+         * 调用方静默降级（镜像留空、模式回内置），只有彻底失败才留一条 warning。
+         */
+        const withRetry = async (operation, label, attempts = 3) => {
+          let lastError;
+          for (let attempt = 0; attempt < attempts; attempt += 1) {
+            try {
+              return await operation();
+            } catch (error) {
+              lastError = error;
+            }
+            if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 400 * (2 ** attempt)));
+          }
+          console.warn('session-tags: ' + label + ' failed after ' + attempts + ' attempts:', lastError);
+          return undefined;
+        };
+
+        // 行首标签色点（私有 inline 座位；状态点占用时 SessionNodeItem 不调本座位 →
+        // 色点让位，取舍见 SessionTagDots 注释）。
+        ctx.slots.inject(SESSION_TAG_SLOTS.rowLeading, () => ctx.slots.register({
+          name: SESSION_TAG_SLOTS.rowLeading,
           id: 'session-tags.dots',
           order: 10,
         }, SessionTagDots));
 
-        // 悬停卡扩展段（票 #4 AC 补口）：标签名进会话悬停卡。hover 槽由
+        // 悬停卡扩展段（票 #4 AC 补口）：标签名进会话悬停卡。私有 hover 座位由
         // SessionHoverContent 无条件 renderSlot（在 showStatus 分支之外），状态点
         // 占用 leading 格、色点让位时标签名仍在此可见；无标签本占用者渲染 null。
-        ctx.slots.inject('sidebar.session.row.hover', () => ctx.slots.register({
-          name: 'sidebar.session.row.hover',
+        ctx.slots.inject(SESSION_TAG_SLOTS.rowHover, () => ctx.slots.register({
+          name: SESSION_TAG_SLOTS.rowHover,
           id: 'session-tags.hover-tags',
           order: 10,
         }, SessionHoverTags));
+
+        // 行尾悬停按钮：archive(100) / pin(200)，与内置同序（uiw client.js:6099-6114）。
+        // 内置那两只按钮注册在内置座位 `sidebar.workspaces.session.row.action` 上，影子渲染
+        // 不了；这里在私有 rowAction 座位复刻，动作面见 rowActionInjected（确认框/toast 复用）。
+        ctx.slots.inject(SESSION_TAG_SLOTS.rowAction, function* () {
+          yield ctx.slots.register({
+            name: SESSION_TAG_SLOTS.rowAction,
+            id: 'session-tags.archive',
+            order: 100,
+            locale: NS,
+            inject: rowActionInjected,
+          }, ArchiveSessionRowButton);
+          yield ctx.slots.register({
+            name: SESSION_TAG_SLOTS.rowAction,
+            id: 'session-tags.pin',
+            order: 200,
+            locale: NS,
+            inject: rowActionInjected,
+          }, PinSessionRowButton);
+        });
 
         // 「编辑标签」菜单项：走 contextMenus.register（内置会话菜单五项的同款
         // 机制：pin 100 / rename 200 / fork 300 / copy-id 450 / archive 600，
@@ -3572,19 +3853,21 @@ window.__ModuleLoader__.load({
           locale: NS,
         }, TagEditorOverlay));
 
-        // 首屏全量镜像（异步，失败只降级为「弹层打开时再取」，不阻塞 shadow 渲染）。
-        tagActions.refreshAll().catch((error) => {
-          console.warn('session-tags: initial tag snapshot failed:', error);
-        });
+        // 首屏全量镜像（异步，失败降级为「弹层打开时再取」，不阻塞 shadow 渲染；
+        // Host 半就绪晚于页面时由 withRetry 重试，最终失败只记一条 warning）。
+        withRetry(() => tagActions.refreshAll(), 'initial tag snapshot');
 
         // 模式恢复（票 #5：跨重启记忆）：Host 域 mode='tag' 时恢复标签聚合视图；
         // 其余值不动共享 view store（内置模式以它为准）；失败降级内置模式。
-        tagActions.getMode().then((mode) => {
+        withRetry(() => tagActions.getMode(), 'view mode restore').then((mode) => {
           viewModeStore.set({ restored: true, tagMode: mode === 'tag' });
-        }).catch((error) => {
-          viewModeStore.set({ restored: true, tagMode: false });
-          console.warn('session-tags: view mode restore failed:', error);
         });
+        } catch (error) {
+          // 防御：client 半在任何一步抛错都不得让页面启动失败（web boot 会因单入口
+          // 失败而判定整体启动失败，桌面端会卡死在错误页）。记录完整错误，其余注册
+          // 保持已生效的部分，UI 按可用性降级。
+          console.error('session-tags: client apply failed:', error && (error.stack || error.message) || error);
+        }
       },
       /**
        * 纯逻辑层测试 seam（spec「Testing Decisions」：只测外部行为；UI 渲染层不自动化测试）。
@@ -3592,6 +3875,8 @@ window.__ModuleLoader__.load({
        */
       logic: {
         SLOT_NAME,
+        SESSION_TAG_SLOTS,
+        BUILTIN_ROW_ACTION_SEAT,
         TAG_RPC_CHANNEL,
         SHADOW_PRIORITY,
         VIEW_PERSIST_KEY,

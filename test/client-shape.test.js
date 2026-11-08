@@ -75,6 +75,27 @@ describe('清单（package.json / cordis.patch.yml）', () => {
   });
 });
 
+describe('影子私有子座位（boot 修复）', () => {
+  it('声明的是本插件私有座位，且 renderSlot 不引用任何内置子座位', () => {
+    const artifact = loadClientArtifact(clientPath);
+    const module = artifact.factory(() => { throw new Error('no require'); });
+    const slots = module.logic.SESSION_TAG_SLOTS;
+    expect(Object.values(slots)).toEqual([
+      'session-tags.directoryFlow',
+      'session-tags.session.row.action',
+      'session-tags.session.row.leading',
+      'session-tags.session.row.trailing',
+      'session-tags.session.row.hover',
+    ]);
+    // 内置座位名只允许出现在「探测内置行尾按钮动作面」的常量里，绝不 renderSlot。
+    expect(module.logic.BUILTIN_ROW_ACTION_SEAT).toBe('sidebar.workspaces.session.row.action');
+    expect(clientSource).not.toMatch(/renderSlot\('sidebar\./);
+    // children 用私有座位声明（旧的占位座位已移除）。
+    for (const seat of Object.values(slots)) expect(clientSource).toContain('[SESSION_TAG_SLOTS.' + Object.keys(slots).find((key) => slots[key] === seat) + ']');
+    expect(clientSource).not.toContain("'session-tags.self'");
+  });
+});
+
 describe('locale 词表（client 内联 与 locale/*.json 不漂移）', () => {
   it('zh/en JSON 存在且带 meta.title=会话标签（zh）', () => {
     const zh = JSON.parse(readFileSync(path.join(appRoot, 'locale', 'zh.json'), 'utf8'));

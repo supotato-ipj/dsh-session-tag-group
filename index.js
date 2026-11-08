@@ -76,7 +76,13 @@ export function hostSessionExists(ctx) {
  */
 export async function apply(ctx) {
   const domain = await ctx.storageDomain.open(TAG_DOMAIN_SPEC);
-  ctx.effect(() => domain.close(), 'session-tags: storage domain');
+  // Cordis 的 ctx.effect(setup, label) 语义：setup **立即执行**，返回值才是 disposer
+  // （cordis lib/index.js Fiber#effect；dsh 内置插件一律 `ctx.effect(() => xxx.register(...))`）。
+  // 因此必须写成「setup 返回 teardown」——原写法 `() => domain.close()` 会在注册瞬间
+  // 立刻关闭刚打开的 domain，之后 /session-tags 的每次读写都撞
+  // `DomainError("closed", "domain 'session_tags' is closed")`（T3 起客户端首屏全量
+  // 镜像因此一直失败）。惰性关闭：仅真正卸载时才 close。
+  ctx.effect(() => () => domain.close(), 'session-tags: storage domain');
 
   const service = createTagService({ domain, sessionExists: hostSessionExists(ctx) });
 
